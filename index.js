@@ -251,7 +251,7 @@ async function emplaceMetas(metas, processingParams) {
 
     await emplaceLinksOrMetasImpl(metas, false /* isLink */, processingParams);
 }
-
+FSReqCallback.readFileAfterClose
 async function emplaceLinksOrMetasImpl(linksOrMetas, isLink, processingParams) {
     const tag       = isLink ? '<link ' : '<meta ';
     const finalList = overrideSet(isLink ? linkTags : metaTags, linksOrMetas);
@@ -339,7 +339,7 @@ async function emplaceImpl(tag, readPath, writePath, replacement) {
 
 function clip(str, maxLen) {
     const mL         = maxLen === undefined ? str.length : maxLen;
-    const clippedStr = str.slice(0, Math.min(maxLen, str.length));
+    const clippedStr = str.slice(0, Math.min(mL, str.length));
     return clippedStr.length === str.length ? clippedStr : clippedStr + '...';
 }
 
@@ -391,6 +391,7 @@ function parseFile(file) {
         file.slice(0, versionPos !== -1 ? versionPos : file.length);
     const otherPathInfo = path.parse(realPath);
     return {
+        original: file,
         realpath: realPath,
         version: versionPos !== -1 ? isVersioned(file.slice(versionPos + 1)) ?
                                      file.slice(versionPos + 1) :
