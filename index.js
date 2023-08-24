@@ -6,12 +6,12 @@ const duplicate = fsExtra.copy;
 const os        = require('node:os');
 const fs        = require('node:fs');
 const fsp       = require('node:fs/promises');
+const readline  = require('node:readline/promises');
 const jsdom     = require('jsdom');
 const path      = require('node:path');
 const process   = require('node:process')
 const {rimraf}  = require('rimraf');
 const util      = require('util');
-const readline  = require('readline');
 
 // Logger dependencies
 const winston                                       = require('winston');
@@ -19,11 +19,6 @@ const {combine, colorize, align, printf, timestamp} = winston.format;
 
 // Assertion dependencies
 const assert = require('assert');
-
-
-const rl =
-    readline.createInterface({input: process.stdin, output: process.stdout});
-const prompt = (query) => new Promise((resolve) => rl.question(query, resolve));
 
 const REPL_ID = 'hTmL';
 
@@ -68,62 +63,63 @@ logger.info =
     info(util.format.apply(null, arguments));
 }
 
-    fs.readFile(
-        process.argv[2] ?? 'examples/index.html', 'utf8',
-        async (err, content) => {
-            if (err) {
-                logger.error(err);
-                return;
-            }
+const sourceFile = process.argv[2] ?? 'examples/index.html';
 
-            logger.info('\n\n', '='.repeat(200), '\n\n\n');
+fs.readFile(sourceFile, 'utf8', async (err, content) => {
+    if (err) {
+        logger.error(err);
+        return;
+    }
 
-            const dom  = new jsdom.JSDOM(escapeAllJSXQuotes(content));
-            const doc  = dom.window.document;
-            const root = doc.querySelector('html');
+    logger.info('\n\n', '='.repeat(200), '\n\n\n');
 
-            /* We don't need edited attributes
-             * since we know that we are not going to
-             * be loaded in a react sensitive context
-             * */
-            const pageMetas = extractMetas(doc);
-            const pageLinks = extractLinks(doc);
-            const pageTitle = extractTitle(doc, root);
+    const dom  = new jsdom.JSDOM(escapeAllJSXQuotes(content));
+    const doc  = dom.window.document;
+    const root = doc.querySelector('html');
 
-            logger.info('Title of page', pageTitle);
+    /* We don't need edited attributes
+     * since we know that we are not going to
+     * be loaded in a react sensitive context
+     * */
+    const pageMetas = extractMetas(doc);
+    const pageLinks = extractLinks(doc);
+    const pageTitle = extractTitle(doc, root);
 
-            reconstructTree(root);
-            const scripts    = extractAllScripts(doc, root);
-            const pageStyles = extractStyles(doc, root);
-            const rawHTML    = closeSelfClosingTags(
-                   adjustHTML(dom.window.document.body.innerHTML));
-            logger.info('All scripts: ', scripts);
-            logger.info('All styles: ', pageStyles);
-            try {
-                await cleanOldFiles();
+    logger.info('Title of page', pageTitle);
 
-                //   await requestMissingLinks(doc, pageLinks, scripts);
+    reconstructTree(root);
+    const scripts    = extractAllScripts(doc, root);
+    const pageStyles = extractStyles(doc, root);
+    const rawHTML =
+        closeSelfClosingTags(adjustHTML(dom.window.document.body.innerHTML));
+    logger.info('All scripts: ', scripts);
+    logger.info('All styles: ', pageStyles);
+    try {
+        await cleanOldFiles();
 
-                const processingParams = await initializeProjectStructure();
-                await emplaceRootAttrs(root, processingParams);
-                await emplaceStyle(pageStyles, processingParams);
-                await emplaceTitle(pageTitle, processingParams);
-                await emplaceMetas(pageMetas, processingParams);
-                await emplaceLinks(pageLinks, processingParams);
-                await addScripts(scripts, processingParams);
-                await emplaceHTML(rawHTML, processingParams);
 
-                await removeUnusedTags(processingParams);
-            } catch (err) {
-                logger.error(err);
-                await cleanOldFiles();
-                process.exit(1);
-            }
+        await requestMissingLinks(doc, pageLinks, scripts);
 
-            logger.info('\n\n', '='.repeat(200), '\n\n\n');
+        const processingParams = await initializeProjectStructure();
+        await                          emplaceRootAttrs(root, processingParams);
+        await emplaceStyle(pageStyles, processingParams);
+        await emplaceTitle(pageTitle, processingParams);
+        await emplaceMetas(pageMetas, processingParams);
+        await emplaceLinks(pageLinks, processingParams);
+        await addScripts(scripts, processingParams);
+        await emplaceHTML(rawHTML, processingParams);
 
-            process.exit(0);
-        });
+        await removeUnusedTags(processingParams);
+    } catch (err) {
+        logger.error(err);
+        await cleanOldFiles();
+        process.exit(1);
+    }
+
+    logger.info('\n\n', '='.repeat(200), '\n\n\n');
+
+    process.exit(0);
+});
 
 async function removeUnusedTags(resourcePath) {
     const {appB, scriptB, rootB} = resourcePath;
@@ -251,7 +247,7 @@ async function emplaceMetas(metas, processingParams) {
 
     await emplaceLinksOrMetasImpl(metas, false /* isLink */, processingParams);
 }
-FSReqCallback.readFileAfterClose
+
 async function emplaceLinksOrMetasImpl(linksOrMetas, isLink, processingParams) {
     const tag       = isLink ? '<link ' : '<meta ';
     const finalList = overrideSet(isLink ? linkTags : metaTags, linksOrMetas);
@@ -358,32 +354,127 @@ async function requestMissingLinks(doc) {
 
     if (isEmpty(modifiables)) return;
 
-    const assetDirLookup = buildAssetLookup();
+    const assetDirLookup                  = buildAssetLookup();
+    const pathIgnore                      = await buildPathIgnore(sourceFile);
+    const                    pathIgnoreRe = new RegExp(pathIgnore);
 
-    console.info(`The following assets are loaded by this project 
-         and requires you to supply a path to them: `);
-    const finalProvidedAssetDestination = {};
-    for (const file of modifiables) {
-        const {realpath, version, ext, extv2} = parseFile(file);
-        const suggestedAssetDirectoryName     = assetDirLookup[extv2];
-        let   userSuppliedDirName             = false;
-        while (!userSuppliedDirName) {
-            let reply =
-                (await prompt(`\nSupplied path: ${realpath}${
-                     version !== null ? '\nVersion Tag: ' + version : ''}
-            \nSpecify a path to put all *${
-                     ext} files or use the\nSuggested path '${
-                     suggestedAssetDirectoryName}' ('Enter' to proceed): `))
-                    .trim();
+    console.info(
+        'The following assets are loaded by this project',
+        '\nand requires you to supply a path to them.',
+        '\nYou can supply a directory containing all assets',
+        '\nThe asset will be picked from there');
+    const     resolvedAssetsPath =
+        await processGlobalAssetExtraction(modifiables, pathIgnoreRe);
 
-            if (isEmpty(reply)) {
-                finalProvidedAssetDestination[extv2] =
-                    suggestedAssetDirectoryName;
-            } else {
-            }
-        }
+    logger.info('ResolvedAssetsPath', resolvedAssetsPath);
+}
+
+async function processGlobalAssetExtraction(assetsList, excludeRe) {
+    try {
+        const providedPath = await prompt(`Give directory to all assets: `);
+        const                      pathInfo = fs.statSync(providedPath);
+        if (pathInfo.isDirectory()) {
+            const        maxDepth = 4;
+            return await retrieveAssetsFromGlobalDirectory(
+                providedPath, assetsList, excludeRe, maxDepth);
+        } else
+            throw 'Error: Invalid path provided';
+    } catch (err) {
+        console.error(err);
     }
 }
+
+async function retrieveAssetsFromGlobalDirectory(
+    globalAssetsPath, assetsList, excludePattern, maxDepth) {
+    const directoryIDX = await indexDirectory(globalAssetsPath, {}, 0);
+
+    const requestedAssetsResolvedPath = {};
+
+    for (const asset of assetsList) {
+        const {realpath, version, ext, extv2, base} = parseFile(asset);
+        const providedAsset                         = directoryIDX[base];
+        if (providedAsset) {
+            if (Array.isArray(providedAsset)) {
+                console.info(
+                    '\nThe following list of assets match',
+                    '\nYour request for the file:', base,
+                    '\nEnter the number in front to choose', '\nthe file: ');
+                let counter = 0;
+                for (const file of providedAsset) {
+                    console.info(
+                        ++counter + '.', 'Path: ', file.realpath,
+                        (isNotNull(file.version) ?
+                             '\nVersion: ' + file.version :
+                             ''));
+                }
+                if (isNotNull(version)) {
+                    console.info(
+                        'The file you requested requires version:', version);
+                }
+                const reply = await sanitizedPrompt('Enter your selection: ');
+                assert(typeof + reply === 'number');
+                requestedAssetsResolvedPath[asset] = providedAsset[+reply - 1];
+
+            } else {
+                console.info(
+                    '\nThe file found at', providedAsset.realpath,
+                    '\nhas been selected as a match for the file:', base);
+                requestedAssetsResolvedPath[asset] = providedAsset;
+            }
+        } else {
+            console.log(
+                '\nCannot find asset by the name:', base,
+                'its resolution is left to you');
+        }
+    }
+
+    async function indexDirectory(globalAssetsPath, aggregations, depth) {
+        if (depth >= maxDepth)
+            return aggregations;
+
+        const directoryIterator = await fsp.readdir(globalAssetsPath);
+        for (const file of directoryIterator) {
+            const filePath    = path.join(globalAssetsPath, file);
+            const stat        = fs.statSync(filePath);
+            const isDirectory = stat.isDirectory(filePath);
+
+            if (excludePattern.exec(filePath))
+                continue;
+
+            if (isDirectory) {
+                await indexDirectory(filePath, aggregations, depth + 1);
+            } else {
+                const fileInfo           = parseFile(filePath);
+                const previousOccurrence = aggregations[fileInfo.base];
+                Object.assign(aggregations, {
+                    ...aggregations,
+                    [fileInfo.base]: previousOccurrence ?
+                        Array.isArray(previousOccurrence) ?
+                        previousOccurrence.concat(fileInfo) :
+                        [previousOccurrence, fileInfo] :
+                        fileInfo
+                });
+            }
+        }
+
+        return aggregations;
+    }
+
+    return requestedAssetsResolvedPath;
+}
+
+async function sanitizedPrompt(message) {
+    return (await rl.question(message)).trim().toLowerCase();
+}
+
+async function prompt(question) {
+    return await rl.question(question);
+}
+
+
+var rl =
+    readline.createInterface({input: process.stdin, output: process.stdout});
+
 
 function parseFile(file) {
     const versionPos = file.indexOf('?');
@@ -458,6 +549,37 @@ async function initializeProjectStructure() {
         scriptB: indexJsBuildFullPath,
         appB: appBuildFullPath
     };
+}
+
+async function buildPathIgnore(sourceFile) {
+    const basePath       = path.dirname(sourceFile);
+    const pathIgnoreFile = path.join(basePath, '.pathignore');
+    if (!fs.existsSync(pathIgnoreFile))
+        return;
+
+    const content = (await fsp.readFile(pathIgnoreFile)).toString();
+    return buildRegularExpression(content);
+}
+
+function buildRegularExpression(string) {
+    return string.split('\n')
+        .map(line => line.trim())
+        // Remove standalone comment lines
+        .filter(line => isNotEmpty(line) && line[0] !== '#')
+        .map(line => treat(line))
+        .reduce((acc, cur) => isEmpty(acc) ? cur : acc + '|' + cur, '');
+}
+
+// Remove inline comments, escape dots,
+// extend match for directory ending with `/`
+function treat(line) {
+    return line.replace(/#.+$/, '')
+        .replace(/^\*\*|^\*/, '.*')
+        .replace(/\*\*/g, '.*')
+        .replace(/\.\*$/, '\\..*')
+        .replace(/\/$/, '/.*')
+        .replace(/\.([a-zA-Z-\/]+)/g, '\\.\$1')
+        .replace(/([a-zA-Z-\/]+)\*/g, '\$1.*');
 }
 
 async function cleanOldFiles() {
@@ -692,6 +814,18 @@ function isNotEmpty(list) {
 
 function isEmpty(list) {
     return list.length === 0;
+}
+
+function isBehaved(any) {
+    return any !== undefined;
+}
+
+function isNull(any) {
+    return any === null;
+}
+
+function isNotNull(any) {
+    return !isNull(any);
 }
 
 function isAbsouteURI(link) {
