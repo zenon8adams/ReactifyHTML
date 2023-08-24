@@ -97,11 +97,10 @@ fs.readFile(sourceFile, 'utf8', async (err, content) => {
     try {
         await cleanOldFiles();
 
-
-        await requestMissingLinks(doc, pageLinks, scripts);
-
         const processingParams = await initializeProjectStructure();
-        await                          emplaceRootAttrs(root, processingParams);
+
+        await updateMissingLinks(doc, processingParams, pageLinks, scripts);
+        await emplaceRootAttrs(root, processingParams);
         await emplaceStyle(pageStyles, processingParams);
         await emplaceTitle(pageTitle, processingParams);
         await emplaceMetas(pageMetas, processingParams);
@@ -339,24 +338,20 @@ function clip(str, maxLen) {
     return clippedStr.length === str.length ? clippedStr : clippedStr + '...';
 }
 
-async function requestMissingLinks(doc) {
+async function updateMissingLinks(doc, resourcePath) {
     const modifiables =
-        Object.assign([], Array.from(arguments).slice(1))
-            .flat()
-            // Remove generated scripts
-            .filter(link => !(link.isInline && link.name && link.mime))
-            .concat(projectDependencyInjectionTags
-                        .map(tag => Array.from(doc.querySelectorAll(tag)))
-                        .flat()
-                        .map(el => getAttributesRaw(el)))
-            .map(link => link.src ?? link.href ?? link.name)
-            .filter(link => !isAbsouteURI(link))
+        buildExternalSource(doc, Array.from(arguments).slice(2));
+    const modifiableKeys = modifiables.map(selection => selection.value);
 
-    if (isEmpty(modifiables)) return;
+    logger.info(modifiables);
 
-    const assetDirLookup                  = buildAssetLookup();
-    const pathIgnore                      = await buildPathIgnore(sourceFile);
-    const                    pathIgnoreRe = new RegExp(pathIgnore);
+    if (isEmpty(modifiables))
+        return;
+
+    const pathIgnore = await buildPathIgnore(sourceFile);
+
+    const assetDirLookup = buildAssetLookup();
+    const pathIgnoreRe   = new RegExp(pathIgnore);
 
     console.info(
         'The following assets are loaded by this project',
@@ -364,15 +359,65 @@ async function requestMissingLinks(doc) {
         '\nYou can supply a directory containing all assets',
         '\nThe asset will be picked from there');
     const     resolvedAssetsPath =
-        await processGlobalAssetExtraction(modifiables, pathIgnoreRe);
+        await processGlobalAssetExtraction(modifiableKeys, pathIgnoreRe);
 
-    logger.info('ResolvedAssetsPath', resolvedAssetsPath);
+    await copyResolvedAssetsToOutputDirectory(
+        resolvedAssetsPath, modifiables, resourcePath);
+
+    for (const asset of modifiables) {
+        const repl = resolvedAssetsPath[asset.value];
+        if (!isBehaved(repl))
+            continue;
+
+        const augmentedPath =
+            path.join('assets', assetDirLookup[repl.extv2], repl.base);
+        if (asset.isHTMLElement) {
+            asset.element.setAttribute(asset.source, augmentedPath);
+        } else {
+            Object.assign(
+                asset.element,
+                {...asset.element, [asset.source]: augmentedPath});
+        }
+    }
+
+    logger.info(
+        'ResolvedAssetsPath', resolvedAssetsPath, 'Modified-Modifiables',
+        modifiables);
+}
+
+async function copyResolvedAssetsToOutputDirectory(
+    resolvedAssetsPath, assetsList, resourcePath) {
+    const {publicB} = resourcePath;
+
+    const assetDirLookup = buildAssetLookup();
+    for (const asset of assetsList) {
+        const repl = resolvedAssetsPath[asset.value];
+        if (!isBehaved(repl))
+            continue;
+
+        logger.info('Repl: ', repl);
+        const assetsRealPath = path.join('assets', assetDirLookup[repl.extv2]);
+        const destinationFullPath = path.join(publicB, assetsRealPath);
+        if (!fs.existsSync(destinationFullPath)) {
+            await fsp.mkdir(destinationFullPath, {recursive: true});
+        }
+
+        const destinationAssetFullPath =
+            path.join(destinationFullPath, repl.base);
+
+        logger.info(
+            'RealPath: ', repl.realpath,
+            'destPath: ', destinationAssetFullPath);
+
+        await fsp.copyFile(repl.realpath, destinationAssetFullPath);
+    }
 }
 
 async function processGlobalAssetExtraction(assetsList, excludeRe) {
     try {
         const providedPath = await prompt(`Give directory to all assets: `);
-        const                      pathInfo = fs.statSync(providedPath);
+
+        const pathInfo = fs.statSync(providedPath);
         if (pathInfo.isDirectory()) {
             const        maxDepth = 4;
             return await retrieveAssetsFromGlobalDirectory(
@@ -412,8 +457,9 @@ async function retrieveAssetsFromGlobalDirectory(
                         'The file you requested requires version:', version);
                 }
                 const reply = await sanitizedPrompt('Enter your selection: ');
-                assert(typeof + reply === 'number');
-                requestedAssetsResolvedPath[asset] = providedAsset[+reply - 1];
+                assert(Number.isFinite(+reply));
+                requestedAssetsResolvedPath[asset] =
+                    providedAsset[(+reply + (+reply === 0)) - 1];
 
             } else {
                 console.info(
@@ -463,6 +509,46 @@ async function retrieveAssetsFromGlobalDirectory(
     return requestedAssetsResolvedPath;
 }
 
+function buildExternalSource(doc, tags) {
+    return tags
+        .flat()
+        // Remove generated scripts
+        .filter(link => !(link.isInline && link.name && link.mime))
+        .concat(
+            projectDependencyInjectionTags
+                .map(tag => Array.from(doc.querySelectorAll(tag)))
+                .flat()
+                .map(el => ({attribute: getAttributesRaw(el), element: el})))
+        .map(link => {
+            const {attribute, element} = link;
+            const tag                  = attribute ?? link;
+            const isHTMLElement        = isBehaved(element);
+            if (tag.src) {
+                return {
+                    source: 'src',
+                    value: tag.src,
+                    isHTMLElement: isHTMLElement,
+                    element: isHTMLElement ? element : link
+                };
+            } else if (tag.href) {
+                return {
+                    source: 'href',
+                    value: tag.href,
+                    isHTMLElement: isHTMLElement,
+                    element: isHTMLElement ? element : link
+                };
+            } else if (tag.name) {
+                return {
+                    source: 'name',
+                    value: tag.name,
+                    isHTMLElement: isHTMLElement,
+                    element: isHTMLElement ? element : link
+                };
+            }
+        })
+        .filter(link => !isAbsouteURI(link.value));
+}
+
 async function sanitizedPrompt(message) {
     return (await rl.question(message)).trim().toLowerCase();
 }
@@ -471,10 +557,8 @@ async function prompt(question) {
     return await rl.question(question);
 }
 
-
 var rl =
     readline.createInterface({input: process.stdin, output: process.stdout});
-
 
 function parseFile(file) {
     const versionPos = file.indexOf('?');
@@ -494,6 +578,9 @@ function parseFile(file) {
 }
 
 function buildAssetLookup() {
+    if (buildAssetLookup.assetDirLookup)
+        return buildAssetLookup.assetDirLookup;
+
     const mimeDB = require('mime-db');
     const assetDirLookup =
         Object.keys(mimeDB)
@@ -503,7 +590,7 @@ function buildAssetLookup() {
                     ext => ({[ext]: mimeKey.split('/')[0]})))
             .reduce((acc, cur) => ({...acc, ...cur.shift()}), {});
 
-    return assetDirLookup;
+    return buildAssetLookup.assetDirLookup = assetDirLookup;
 }
 
 function isVersioned(file) {
