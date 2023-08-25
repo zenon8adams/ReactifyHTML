@@ -460,7 +460,6 @@ async function retrieveAssetsFromGlobalDirectory(
                 assert(Number.isFinite(+reply));
                 requestedAssetsResolvedPath[asset] =
                     providedAsset[(+reply + (+reply === 0)) - 1];
-
             } else {
                 console.info(
                     '\nThe file found at', providedAsset.realpath,
