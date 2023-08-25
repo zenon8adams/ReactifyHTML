@@ -466,7 +466,7 @@ async function retrieveAssetsFromGlobalDirectory(
                     '\nhas been selected as a match for the file:', base);
                 requestedAssetsResolvedPath[asset] = providedAsset;
             }
-        } else {
+        } else if (isNotEmpty(ext)) {
             console.log(
                 '\nCannot find asset by the name:', base,
                 'its resolution is left to you');
@@ -509,43 +509,46 @@ async function retrieveAssetsFromGlobalDirectory(
 }
 
 function buildExternalSource(doc, tags) {
-    return tags
-        .flat()
-        // Remove generated scripts
-        .filter(link => !(link.isInline && link.name && link.mime))
-        .concat(
-            projectDependencyInjectionTags
-                .map(tag => Array.from(doc.querySelectorAll(tag)))
-                .flat()
-                .map(el => ({attribute: getAttributesRaw(el), element: el})))
-        .map(link => {
-            const {attribute, element} = link;
-            const tag                  = attribute ?? link;
-            const isHTMLElement        = isBehaved(element);
-            if (tag.src) {
-                return {
-                    source: 'src',
-                    value: tag.src,
-                    isHTMLElement: isHTMLElement,
-                    element: isHTMLElement ? element : link
-                };
-            } else if (tag.href) {
-                return {
-                    source: 'href',
-                    value: tag.href,
-                    isHTMLElement: isHTMLElement,
-                    element: isHTMLElement ? element : link
-                };
-            } else if (tag.name) {
-                return {
-                    source: 'name',
-                    value: tag.name,
-                    isHTMLElement: isHTMLElement,
-                    element: isHTMLElement ? element : link
-                };
-            }
-        })
-        .filter(link => !isAbsouteURI(link.value));
+    const source =
+        tags.flat()
+            // Remove generated scripts
+            .filter(link => !(link.isInline && link.name && link.mime))
+            .concat(
+                projectDependencyInjectionTags
+                    .map(tag => Array.from(doc.querySelectorAll(tag)))
+                    .flat()
+                    .map(
+                        el => ({attribute: getAttributesRaw(el), element: el})))
+            .map(link => {
+                const {attribute, element} = link;
+                const tag                  = attribute ?? link;
+                const isHTMLElement        = isBehaved(element);
+                if (tag.src) {
+                    return {
+                        source: 'src',
+                        value: tag.src,
+                        isHTMLElement: isHTMLElement,
+                        element: isHTMLElement ? element : link
+                    };
+                } else if (tag.href) {
+                    return {
+                        source: 'href',
+                        value: tag.href,
+                        isHTMLElement: isHTMLElement,
+                        element: isHTMLElement ? element : link
+                    };
+                } else if (tag.name) {
+                    return {
+                        source: 'name',
+                        value: tag.name,
+                        isHTMLElement: isHTMLElement,
+                        element: isHTMLElement ? element : link
+                    };
+                }
+            })
+            .filter(link => link && !isAbsouteURI(link.value));
+
+    return source;
 }
 
 async function sanitizedPrompt(message) {
