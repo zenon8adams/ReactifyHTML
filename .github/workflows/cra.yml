@@ -33,6 +33,9 @@ jobs:
       - name: Generate template
         run: node index.js
 
+        post: |
+              cat logs/progress-$(date +'%Y-%m-%d').log
+
       - name: Install Template build dependencies
         working-directory: build
         run: yarn install
