@@ -17,7 +17,7 @@ jobs:
 
     strategy:
       matrix:
-        node-version: [16.x, 18.x, 20.x]
+        node-version: [18.x, 20.x]
 
     steps:
       - uses: actions/checkout@v2
@@ -29,9 +29,14 @@ jobs:
 
       - name: Install dependencies
         run: yarn install
-
+      
       - name: Generate template
-        run: node index.js
+        uses: gacts/run-and-post-run@v1
+        with:
+          run: node index.js
+          post: |
+              echo "Post motem"
+              cat logs/progress-$(date +'%Y-%m-%d').log
 
       - name: Install Template build dependencies
         working-directory: build
