@@ -38,8 +38,13 @@ const ROOT_ATTR_TAG = 'ROOT_ATTRIBUTES';
 const BUILD_DIR = 'build';
 const HOOKS_DIR = 'hooks';
 
+const PENDING_RESOLUTION = 'pending';
+
 const converterConfig = {
     useHooks: false,
+    searchDepth: 4,
+    deduceAssetsPathFromBaseDirectory: true,
+    usePathRelativeIndex: true,
     zip: false
 };
 
@@ -73,7 +78,7 @@ fs.readFile(sourceFile, 'utf8', async (err, content) => {
 
     logger.info('\n\n', '='.repeat(200), '\n\n\n');
 
-    const dom  = new jsdom.JSDOM(escapeAllJSXQuotes(content));
+    const dom  = new jsdom.JSDOM(content);
     const doc  = dom.window.document;
     const root = doc.querySelector('html');
 
@@ -85,7 +90,6 @@ fs.readFile(sourceFile, 'utf8', async (err, content) => {
     const pageLinks = extractLinks(doc);
     const pageTitle = extractTitle(doc, root);
 
-    logger.info('Title of page', pageTitle);
 
     reconstructTree(root);
     const scripts    = extractAllScripts(doc, root);
@@ -133,27 +137,35 @@ async function removeUnusedTags(resourcePath) {
 }
 
 async function addScripts(scripts, resourcePath) {
-    const {publicB, srcB} = resourcePath;
-    const useScripts      = scripts.filter(script => script.isInline);
-    const scriptsFullPath = path.join(
-        !converterConfig.useHooks ? publicB : srcB, 'assets',
-        'script' + ['', 's'].at(useScripts.length > 1));
+    const {publicB, srcB}       = resourcePath;
+    const conventionScriptPaths = buildAssetLookup();
+    scripts.map(script => {
+        const scriptInfo = parseFile(script.scriptName);
+        const conventionalScriptPath =
+            conventionScriptPaths[scriptInfo.extv2] ?? 'script';
+
+        const scriptsFullPath = path.join(
+            !converterConfig.useHooks ? publicB : srcB, 'assets',
+            conventionalScriptPath);
+        return Object.assign(script, {...script, path: scriptsFullPath});
+    });
+    const useScripts = scripts.filter(script => script.isInline);
 
     if (isEmpty(useScripts)) {
         await removeHooks('*', resourcePath);
     } else {
-        await fsp.mkdir(scriptsFullPath, {recursive: true});
-        await Promise.all(useScripts.map(
-            async (script) => await fsp.writeFile(
-                path.join(scriptsFullPath, script.name), script.content)));
+        await Promise.all(useScripts.map(async (script) => {
+            await        fsp.mkdir(script.path, {recursive: true});
+            return await fsp.writeFile(
+                path.join(script.path, script.scriptName), script.content)
+        }));
     }
 
     await[emplaceInRoot, emplaceHooks].at(converterConfig.useHooks)(
-        scripts, scriptsFullPath, resourcePath);
+        scripts, resourcePath);
 }
 
-async function emplaceInRoot(scripts, scriptsFullPath, resourcePath) {
-    const scriptBasename = path.basename(scriptsFullPath);
+async function emplaceInRoot(scripts, resourcePath) {
     const scriptsList =
         scripts
             .reduce(
@@ -161,12 +173,13 @@ async function emplaceInRoot(scripts, scriptsFullPath, resourcePath) {
                     if (!script.isInline) {
                         const attrs = joinAttrs(
                             getAttributesRaw(script.script),
-                            {src: script.name});
+                            {src: script.scriptName});
                         return acc + `<script ${attrs}></script>` +
                             '\n\t';
                     } else {
+                        const scriptBasename = path.basename(script.path);
                         return acc + '<script src=\'' +
-                            path.join(scriptBasename, script.name) +
+                            path.join(scriptBasename, script.scriptName) +
                             '\' type=\'' + script.mime + '\'></script>\n\t';
                     }
                 },
@@ -184,12 +197,13 @@ function joinAttrs(attrs, extras) {
         .trim();
 }
 
-async function emplaceHooks(scripts, scriptsFullPath, resourcePath) {
+async function emplaceHooks(scripts, resourcePath) {
     const scriptBasename = path.basename(scriptsFullPath);
     const scriptsList    = scripts.reduce(
            (acc, script) => acc + '\'' +
-               (!script.isInline ? script.name :
-                                   path.join(scriptBasename, script.name)) +
+               (!script.isInline ?
+                    script.scriptName :
+                    path.join(path.basename(script.path), script.scriptName)) +
                '\'' +
                ',\n\t',
            '\n\t');
@@ -333,7 +347,7 @@ async function emplaceImpl(tag, readPath, writePath, replacement) {
 }
 
 function clip(str, maxLen) {
-    const mL         = maxLen === undefined ? str.length : maxLen;
+    const mL         = isNotBehaved(maxLen) ? str.length : maxLen;
     const clippedStr = str.slice(0, Math.min(mL, str.length));
     return clippedStr.length === str.length ? clippedStr : clippedStr + '...';
 }
@@ -351,26 +365,22 @@ async function updateMissingLinks(doc, resourcePath) {
     const pathIgnore = await buildPathIgnore(sourceFile);
 
     const assetDirLookup = buildAssetLookup();
-    const pathIgnoreRe   = new RegExp(pathIgnore);
+    const pathIgnoreRe   = new RegExp(pathIgnore ?? '$^');
 
-    console.info(
-        'The following assets are loaded by this project',
-        '\nand requires you to supply a path to them.',
-        '\nYou can supply a directory containing all assets',
-        '\nThe asset will be picked from there');
-    const     resolvedAssetsPath =
-        await processGlobalAssetExtraction(modifiableKeys, pathIgnoreRe);
+    const searchDepth        = converterConfig.searchDepth;
+    const resolvedAssetsPath = await retrieveAssetsFromGlobalDirectory(
+        modifiables, pathIgnoreRe, searchDepth);
 
     await copyResolvedAssetsToOutputDirectory(
         resolvedAssetsPath, modifiables, resourcePath);
 
     for (const asset of modifiables) {
-        const repl = resolvedAssetsPath[asset.value];
-        if (!isBehaved(repl))
+        const repl     = resolvedAssetsPath[asset.value];
+        const finalDir = generateAssetsFinalDirectory(asset);
+        if (isNotBehaved(repl))
             continue;
 
-        const augmentedPath =
-            path.join('assets', assetDirLookup[repl.extv2], repl.base);
+        const augmentedPath = path.join('assets', finalDir, repl.base);
         if (asset.isHTMLElement) {
             asset.element.setAttribute(asset.source, augmentedPath);
         } else {
@@ -387,16 +397,17 @@ async function updateMissingLinks(doc, resourcePath) {
 
 async function copyResolvedAssetsToOutputDirectory(
     resolvedAssetsPath, assetsList, resourcePath) {
-    const {publicB} = resourcePath;
+    const {publicB}              = resourcePath;
+    const {usePathRelativeIndex} = converterConfig;
 
     const assetDirLookup = buildAssetLookup();
     for (const asset of assetsList) {
         const repl = resolvedAssetsPath[asset.value];
-        if (!isBehaved(repl))
+        if (isNotBehaved(repl))
             continue;
 
-        logger.info('Repl: ', repl);
-        const assetsRealPath = path.join('assets', assetDirLookup[repl.extv2]);
+        const finalDir            = generateAssetsFinalDirectory(asset);
+        const assetsRealPath      = path.join('assets', finalDir);
         const destinationFullPath = path.join(publicB, assetsRealPath);
         if (!fs.existsSync(destinationFullPath)) {
             await fsp.mkdir(destinationFullPath, {recursive: true});
@@ -413,67 +424,138 @@ async function copyResolvedAssetsToOutputDirectory(
     }
 }
 
-async function processGlobalAssetExtraction(assetsList, excludeRe) {
-    try {
-        const providedPath = await prompt(`Give directory to all assets: `);
-
-        const pathInfo = fs.statSync(providedPath);
-        if (pathInfo.isDirectory()) {
-            const        maxDepth = 4;
-            return await retrieveAssetsFromGlobalDirectory(
-                providedPath, assetsList, excludeRe, maxDepth);
-        } else
-            throw 'Error: Invalid path provided';
-    } catch (err) {
-        console.error(err);
+function generateAssetsFinalDirectory(assetBundle) {
+    const {usePathRelativeIndex} = converterConfig;
+    const asset                  = parseFile(assetBundle.value);
+    const assetDir               = path.normalize(path.basename(asset.dir));
+    if (usePathRelativeIndex && isNotEmpty(assetDir)) {
+        return assetDir;
     }
+
+    const assetDirLookup        = buildAssetLookup();
+    const conventionalDirectory = assetDirLookup[asset.extv2 ?? ''];
+    if (isBehaved(conventionalDirectory)) {
+        return conventionalDirectory;
+    }
+
+    return assetDir;
 }
 
 async function retrieveAssetsFromGlobalDirectory(
-    globalAssetsPath, assetsList, excludePattern, maxDepth) {
-    const directoryIDX = await indexDirectory(globalAssetsPath, {}, 0);
+    assetsList, excludePattern, maxDepth) {
+    // Preconditions
+    assert(Array.isArray(assetsList));
+    assert(excludePattern instanceof RegExp);
+    assert(typeof maxDepth === 'number');
 
     const requestedAssetsResolvedPath = {};
+    const [globalAssetsPath, directoryIDX] =
+        await resolveGlobalAssetsPath(excludePattern);
+    if (isEmpty(Object.keys(directoryIDX)))
+        return requestedAssetsResolvedPath;
 
-    for (const asset of assetsList) {
-        const {realpath, version, ext, extv2, base} = parseFile(asset);
-        const providedAsset                         = directoryIDX[base];
+
+    for (const assetBundle of assetsList) {
+        const asset                                      = assetBundle.value;
+        const {realpath, version, ext, extv2, base, dir} = parseFile(asset);
+        const providedAsset                              = directoryIDX[base];
+
         if (providedAsset) {
             if (Array.isArray(providedAsset)) {
-                console.info(
-                    '\nThe following list of assets match',
-                    '\nYour request for the file:', base,
-                    '\nEnter the number in front to choose', '\nthe file: ');
-                let counter = 0;
-                for (const file of providedAsset) {
+                const withSimilarOrigin = groupAssetsWithSimilarOrigin(
+                    providedAsset, path.normalize(dir));
+                if (withSimilarOrigin.length === 1) {
                     console.info(
-                        ++counter + '.', 'Path: ', file.realpath,
-                        (isNotNull(file.version) ?
-                             '\nVersion: ' + file.version :
-                             ''));
-                }
-                if (isNotNull(version)) {
+                        '\nThe file found at', withSimilarOrigin[0].realpath,
+                        '\nhas been selected as a match for the file:', base);
+                    requestedAssetsResolvedPath[asset] = withSimilarOrigin[0];
+                } else {
                     console.info(
-                        'The file you requested requires version:', version);
+                        '\nThe following list of assets match',
+                        '\nYour request for the file:', base,
+                        '\nEnter the number in front to choose',
+                        '\nthe file: ');
+                    let counter = 0;
+                    for (const file of providedAsset) {
+                        console.info(
+                            ++counter + '.', 'Path: ', file.realpath,
+                            (isNotNull(file.version) ?
+                                 '\nVersion: ' + file.version :
+                                 ''));
+                    }
+                    if (isNotNull(version)) {
+                        console.info(
+                            'The file you requested requires version:',
+                            version);
+                    }
+                    const     reply =
+                        await sanitizedPrompt('Enter your selection: ');
+                    assert(Number.isFinite(+reply));
+                    requestedAssetsResolvedPath[asset] =
+                        providedAsset[(+reply + (+reply === 0)) - 1];
                 }
-                const reply = await sanitizedPrompt('Enter your selection: ');
-                assert(Number.isFinite(+reply));
-                requestedAssetsResolvedPath[asset] =
-                    providedAsset[(+reply + (+reply === 0)) - 1];
             } else {
                 console.info(
                     '\nThe file found at', providedAsset.realpath,
                     '\nhas been selected as a match for the file:', base);
                 requestedAssetsResolvedPath[asset] = providedAsset;
             }
-        } else if (isNotEmpty(ext)) {
-            console.log(
-                '\nCannot find asset by the name:', base,
+        } else if (!isSelfReference(base)) {
+            console.info(
+                '\nCannot find asset by the name:', '`' + base + '`',
                 'its resolution is left to you');
         }
     }
 
-    async function indexDirectory(globalAssetsPath, aggregations, depth) {
+    assert(
+        isNotNull(requestedAssetsResolvedPath) &&
+        isBehaved(requestedAssetsResolvedPath));
+
+    return requestedAssetsResolvedPath;
+}
+
+function groupAssetsWithSimilarOrigin(providedAssets, origin) {
+    return providedAssets.filter(
+        asset => path.normalize(asset.dir).search(origin) !== -1);
+}
+
+
+async function resolveGlobalAssetsPath(excludePattern) {
+    const {deduceAssetsPathFromBaseDirectory} = converterConfig;
+    if (!deduceAssetsPathFromBaseDirectory) {
+        console.info(
+            'The following assets are loaded by this project',
+            '\nand requires you to supply a path to them.',
+            '\nYou can supply a directory containing all assets',
+            '\nThe asset will be picked from there');
+        try {
+            const providedPath = await prompt(`Give directory to all assets: `);
+
+            const pathInfo = fs.statSync(providedPath);
+            if (pathInfo.isDirectory()) {
+                return [
+                    providedPath,
+                    await indexDirectory(providedPath, excludePattern, {}, 0)
+                ];
+            } else
+                throw 'Error: Invalid path provided';
+        } catch (err) {
+            console.error(err);
+            return ['', requestedAssetsResolvedPath];
+        }
+    } else {
+        const providedPath = path.dirname(sourceFile);
+        return [
+            providedPath,
+            await indexDirectory(providedPath, excludePattern, {}, 0)
+        ];
+    }
+}
+
+async function indexDirectory(globalAssetsPath, excludePattern, maxDepth) {
+    return await indexDirectoryImpl(globalAssetsPath, {}, 0);
+
+    async function indexDirectoryImpl(globalAssetsPath, aggregations, depth) {
         if (depth >= maxDepth)
             return aggregations;
 
@@ -487,7 +569,7 @@ async function retrieveAssetsFromGlobalDirectory(
                 continue;
 
             if (isDirectory) {
-                await indexDirectory(filePath, aggregations, depth + 1);
+                await indexDirectoryImpl(filePath, aggregations, depth + 1);
             } else {
                 const fileInfo           = parseFile(filePath);
                 const previousOccurrence = aggregations[fileInfo.base];
@@ -504,15 +586,20 @@ async function retrieveAssetsFromGlobalDirectory(
 
         return aggregations;
     }
+}
 
-    return requestedAssetsResolvedPath;
+
+function isSelfReference(baseFile) {
+    return path.basename(sourceFile) === baseFile;
 }
 
 function buildExternalSource(doc, tags) {
     const source =
         tags.flat()
             // Remove generated scripts
-            .filter(link => !(link.isInline && link.name && link.mime))
+            .filter(
+                link =>
+                    !link.scriptName || !isGeneratedScriptName(link.scriptName))
             .concat(
                 projectDependencyInjectionTags
                     .map(tag => Array.from(doc.querySelectorAll(tag)))
@@ -537,18 +624,24 @@ function buildExternalSource(doc, tags) {
                         isHTMLElement: isHTMLElement,
                         element: isHTMLElement ? element : link
                     };
-                } else if (tag.name) {
+                } else if (tag.scriptName) {
                     return {
-                        source: 'name',
-                        value: tag.name,
+                        source: 'scriptName',
+                        value: tag.scriptName,
                         isHTMLElement: isHTMLElement,
                         element: isHTMLElement ? element : link
                     };
                 }
             })
-            .filter(link => link && !isAbsouteURI(link.value));
+            .filter(
+                link => link && !isAbsouteURI(link.value) &&
+                    !isSelfReference(link.value));
 
     return source;
+}
+
+function isGeneratedScriptName(name) {
+    return name?.match(/^sc-\d{4}\.[a-z]+$/);
 }
 
 async function sanitizedPrompt(message) {
@@ -583,16 +676,22 @@ function buildAssetLookup() {
     if (buildAssetLookup.assetDirLookup)
         return buildAssetLookup.assetDirLookup;
 
-    const mimeDB = require('mime-db');
+    const mimeDatabase = mimeDB();
     const assetDirLookup =
-        Object.keys(mimeDB)
-            .filter((mimeKey) => mimeDB[mimeKey].extensions)
+        Object.keys(mimeDatabase)
+            .filter((mimeKey) => mimeDatabase[mimeKey].extensions)
             .map(
-                mimeKey => mimeDB[mimeKey].extensions.map(
+                mimeKey => mimeDatabase[mimeKey].extensions.map(
                     ext => ({[ext]: mimeKey.split('/')[0]})))
             .reduce((acc, cur) => ({...acc, ...cur.shift()}), {});
 
     return buildAssetLookup.assetDirLookup = assetDirLookup;
+}
+
+function mimeDB() {
+    if (mimeDB.mimeDB)
+        return mimeDB.mimeDB;
+    return mimeDB.mimeDB = require('mime-db');
 }
 
 function isVersioned(file) {
@@ -731,7 +830,7 @@ function extractStyles(doc, node) {
 }
 
 function escapeAllJSXQuotes(text) {
-    return text.replace(/\{([^\}]+?)\}/gm, `{'{$1}'}`);
+    return text.replace(/\{([^\}]+)\}(?!\})/gm, `{'{$1}'}`);
 }
 
 function extractAllScripts(doc, node) {
@@ -752,7 +851,9 @@ function extractAllScripts(doc, node) {
         let   src   = attrs[SRC];
         logger.info(attrs, mime, src);
 
-        assert.notEqual(mime.indexOf('javascript'), -1);
+        const mimeDBEntry = mimeDB()[mime];
+        assert(isBehaved(mimeDBEntry));
+        const extension = mimeDBEntry?.extensions?.[0] ?? 'js';
 
         let id = null;
         if (!src) {
@@ -765,11 +866,13 @@ function extractAllScripts(doc, node) {
 
         assert.notEqual(src || id, null);
 
+        const isExternalHTML = extension === 'html';
+
         return {
-            script: script,
+            script: isExternalHTML ? adaptToHTML(doc, script) : script,
             isInline: !src,
             mime: mime,
-            name: src ?? `sc-${id}.js`,
+            scriptName: src ?? `sc-${id}.${extension}`,
             content: script.innerHTML.trim()
         };
     });
@@ -779,6 +882,13 @@ function extractAllScripts(doc, node) {
     });
 
     return scripts;
+}
+
+function adaptToHTML(doc, element) {
+    const externalResolver = doc.createElement('object');
+    modifyAttributes(externalResolver, getAttributes(element));
+
+    return externalResolver;
 }
 
 function randomCounter(nDigits) {
@@ -793,7 +903,8 @@ function randomCounter(nDigits) {
 // Replace the augmented version of the attribute
 // with the real attribute.
 function adjustHTML(semiRawHTML) {
-    return semiRawHTML.replace(new RegExp(`${REPL_ID}([a-z]+)`, 'gm'), '\$1')
+    return escapeAllJSXQuotes(semiRawHTML)
+        .replace(new RegExp(`${REPL_ID}([a-z]+)`, 'gm'), '\$1')
         .replace(/"\{\{([^\}]+)\}\}"/g, '{{\$1}}')
         .replace(/"\{([^\}]+)\}"/g, '{\$1}');
 }
@@ -909,6 +1020,10 @@ function isBehaved(any) {
     return any !== undefined;
 }
 
+function isNotBehaved(any) {
+    return !isBehaved(any);
+}
+
 function isNull(any) {
     return any === null;
 }
@@ -1006,7 +1121,7 @@ var metaTags = [
         name: 'theme-color',
         content: '#000000',
     },
-    {name: 'description', content: 'Web site created using jsx-generator'}
+    {name: 'description', content: 'Web site created using ReactifyHTML'}
 ];
 
 var linkTags = [
