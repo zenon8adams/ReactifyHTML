@@ -2,7 +2,7 @@
  * MIT License
  *
  *
- *   Copyright (c) 2023 Adesina Meekness
+ *   Copyright (c) 2023 Meekness Adesina
  *
  *   Permission is hereby granted, free of charge, to any person obtaining a
  *   copy of this software and associated documentation files (the "Software"),
