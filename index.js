@@ -1107,7 +1107,12 @@ function reconstructTree(node) {
 function modifyAttributes(node, attributes) {
     Object.keys(attributes).forEach(attr => {
         attr = attr.toLowerCase();
-        if (reactAttributesLookup[attr]) {
+        let ns;
+        if ((ns = isNamespaced(attr))) {
+            const modTag    = ns[1] + ns[2][0].toUpperCase() + ns[2].slice(1);
+            const attrValue = node.getAttribute(attr);
+            node.setAttributeNS(null, modTag, attrValue);
+        } else if (reactAttributesLookup[attr]) {
             const selection = reactAttributesLookup[attr];
             switch (selection.type) {
                 case 'boolean':
@@ -1132,6 +1137,10 @@ function modifyAttributes(node, attributes) {
             return;
         }
     });
+}
+
+function isNamespaced(attribute) {
+    return attribute.match(/^([a-z-]+):([a-z-]+)$/);
 }
 
 function augment(attr) {
