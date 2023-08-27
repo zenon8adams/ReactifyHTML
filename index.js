@@ -135,8 +135,8 @@ fs.readFile(sourceFile, 'utf8', async (err, content) => {
         const [updatedStyle, styleIndexer] =
             await updateStyleLinks(doc, processingParams, indexer, pageStyles);
 
-        const rawHTML = closeSelfClosingTags(
-            adjustHTML(dom.window.document.body.innerHTML));
+        const rawHTML =
+            closeSelfClosingTags(refitTags(dom.window.document.body.innerHTML));
 
         logger.info('All scripts: ', scripts);
         logger.info('All styles: ', pageStyles);
@@ -235,15 +235,15 @@ async function emplaceInRoot(scripts, resourcePath) {
             .reduce(
                 (acc, script) => {
                     if (!script.isInline) {
-                        const attrs = joinAttrs(
+                        const attrs = refitTags(joinAttrs(
                             getAttributesRaw(script.script),
-                            {src: script.scriptName});
+                            {src: script.scriptName}));
                         return acc + `<script ${attrs}></script>` +
                             '\n\t';
                     } else {
-                        return acc + '<script src=\'' +
+                        return acc + '<script src="' +
                             path.join(script.shortPath, script.scriptName) +
-                            '\' type=\'' + script.mime + '\'></script>\n\t';
+                            '" type="' + script.mime + '"></script>\n\t';
                     }
                 },
                 '\n\t')
@@ -256,7 +256,10 @@ async function emplaceInRoot(scripts, resourcePath) {
 
 function joinAttrs(attrs, extras) {
     return Object.entries({...attrs, ...extras})
-        .reduce((acc, [k, v]) => acc + k + '=\'' + v + '\' ', '')
+        .reduce(
+            (acc, [k, v]) =>
+                acc + k + (isNotEmpty(v) ? ('="' + v + '" ') : ' '),
+            '')
         .trim();
 }
 
@@ -496,7 +499,6 @@ async function updateStyleLinks(doc, resourcePath, indexer, style) {
         const patch = resolvedAssetsPath[link.value];
         if (isNotBehaved(patch))
             continue;
-
 
         const finalDir       = generateAssetsFinalDirectory(link);
         const assetsRealPath = path.join(ASSETS_DIR, finalDir);
@@ -1017,7 +1019,7 @@ function extractStyles(doc, node) {
 }
 
 function escapeAllJSXQuotes(text) {
-    return text.replace(/\{([^\}]+)\}(?!\})/gm, `{'{$1}'}`);
+    return text.replace(/(>[^\{<>]*?)\{(.+)\}/gm, `$1{'{$2}'}`);
 }
 
 function extractAllScripts(doc, node) {
@@ -1028,14 +1030,19 @@ function extractAllScripts(doc, node) {
     if (isEmpty(allScripts))
         return allScripts;
 
-    const ID   = augment('id');
-    const SRC  = augment('src');
-    const TYPE = augment('type');
+    const ID    = augment('id');
+    const SRC   = augment('src');
+    const TYPE  = augment('type');
+    const DEFER = augment('defer');
 
     const scripts = allScripts.map(script => {
         const attrs = getAttributes(script);
-        const mime  = attrs[TYPE] ?? 'text/javascript';
-        let   src   = attrs[SRC];
+        if (!attrs[DEFER]) {
+            const selection = reactAttributesLookup['defer'];
+            script.setAttributeNS(null, augment(selection.react), '');
+        }
+        const mime = attrs[TYPE] ?? 'text/javascript';
+        let   src  = attrs[SRC];
         logger.info(attrs, mime, src);
 
         const mimeDBEntry = mimeDB()[mime];
@@ -1089,7 +1096,7 @@ function randomCounter(nDigits) {
 // attributes in such case, it messes things up.
 // Replace the augmented version of the attribute
 // with the real attribute.
-function adjustHTML(semiRawHTML) {
+function refitTags(semiRawHTML) {
     return escapeAllJSXQuotes(semiRawHTML)
         .replace(new RegExp(`${REPL_ID}([a-z]+)`, 'gm'), '\$1')
         .replace(/"\{\{([^\}]+)\}\}"/g, '{{\$1}}')
