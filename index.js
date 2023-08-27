@@ -59,10 +59,11 @@ const SCRIPT_INC_TAG = 'SCRIPT_INCLUDE';
 
 const ROOT_ATTR_TAG = 'ROOT_ATTRIBUTES';
 
-const BUILD_DIR_TAG   = 'BUILD_DIR';
-const ENV_PRE_TAG     = 'ENV_PRESENT';
-const ASSETS_DIR_TAG  = 'ASSETS_DIR';
-const FAVICON_DIR_TAG = 'FAVICON_DIR';
+const BUILD_DIR_TAG      = 'BUILD_DIR';
+const ENV_PRE_TAG        = 'ENV_PRESENT';
+const ASSETS_DIR_TAG     = 'ASSETS_DIR';
+const ASSETS_PRESENT_TAG = 'ASSET_PRESENT';
+const FAVICON_DIR_TAG    = 'FAVICON_DIR';
 
 const BUILD_DIR  = 'build';
 const HOOKS_DIR  = 'hooks';
@@ -131,7 +132,7 @@ fs.readFile(sourceFile, 'utf8', async (err, content) => {
 
         const     indexer =
             await updateMissingLinks(doc, processingParams, pageLinks, scripts);
-        const [updatedStyle, _] =
+        const [updatedStyle, styleIndexer] =
             await updateStyleLinks(doc, processingParams, indexer, pageStyles);
 
         const rawHTML = closeSelfClosingTags(
@@ -150,7 +151,9 @@ fs.readFile(sourceFile, 'utf8', async (err, content) => {
 
         await fixupWebpack(processingParams);
 
-        await removeUnusedTags(processingParams);
+        await removeUnusedTags(
+            processingParams,
+            {...(indexer?.saved ?? {}), ...(styleIndexer?.saved ?? {})});
     } catch (err) {
         logger.error(err);
         await cleanOldFiles();
@@ -162,7 +165,7 @@ fs.readFile(sourceFile, 'utf8', async (err, content) => {
     process.exit(0);
 });
 
-async function removeUnusedTags(resourcePath) {
+async function removeUnusedTags(resourcePath, assetsList) {
     const {appB, scriptB, rootB, publicB, webpackB} = resourcePath;
 
     logger.info('resourcePath', resourcePath);
@@ -180,6 +183,11 @@ async function removeUnusedTags(resourcePath) {
         buildPathTemplateFrom(path.join(publicBaseName, favicon.href));
 
     await emplaceImpl(FAVICON_DIR_TAG, webpackB, webpackB, faviconTemplate);
+
+    const assetIsPresent = isNotEmpty(Object.keys(assetsList));
+    await emplaceImpl(
+        ASSETS_PRESENT_TAG, webpackB, webpackB,
+        assetIsPresent ? 'true' : 'false');
 }
 
 function buildPathTemplateFrom(dir) {
@@ -472,6 +480,10 @@ async function updateStyleLinks(doc, resourcePath, indexer, style) {
                          .filter(link => {
                              return !isAbsoluteURI(unQuote(link[1]));
                          });
+
+    if (isEmpty(fixables)) {
+        return ['', {}];
+    }
 
     const links = fixables.map(
         (link, index) => ({value: unQuote(link[1]), recovery: index}));
@@ -993,7 +1005,7 @@ function extractPropsImpl(doc, selector) {
 function extractStyles(doc, node) {
     const allStyles = Array.from(doc.querySelectorAll('style'));
     if (isEmpty(allStyles))
-        return [];
+        return '';
 
     const jointStyles = allStyles.map(style => style.innerHTML)
                             .reduce((acc, style) => acc + '\n' + style, '')

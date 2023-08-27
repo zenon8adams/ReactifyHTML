@@ -11,7 +11,8 @@ const Modes = {
 };
 
 module.exports = () => {
-    const isProduction = Modes.PRODUCTION;
+    const isProduction   = Modes.PRODUCTION;
+    const assetIsPresent = @{ASSET_PRESENT};
     if ('@{ENV_PRESENT}') {
         require('dotenv').config({path: './.env'});
     }
@@ -73,7 +74,7 @@ module.exports = () => {
                 template: path.join(__dirname, 'public', 'index.html'),
                     favicon: path.join(__dirname, @{FAVICON_DIR}),
             }),
-            new CopyWebpackPlugin({
+            assetIsPresent && new CopyWebpackPlugin({
                 patterns: [
                     {
                         from: path.join('public', '@{ASSETS_DIR}'),
