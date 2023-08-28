@@ -130,10 +130,12 @@ fs.readFile(sourceFile, 'utf8', async (err, content) => {
         const scripts    = extractAllScripts(doc, root);
         const pageStyles = extractStyles(doc, root);
 
-        const     indexer =
+        const     indexerStageA =
             await updateMissingLinks(doc, processingParams, pageLinks, scripts);
-        const [updatedStyle, styleIndexer] =
-            await updateStyleLinks(doc, processingParams, indexer, pageStyles);
+        const [updatedLinks, indexerStageB] = await updateLinksFromLinksContent(
+            doc, processingParams, indexerStageA, pageLinks);
+        const [updatedStyle, indexerStageC] = await updateStyleLinks(
+            doc, processingParams, indexerStageB, pageStyles);
 
         const rawHTML =
             closeSelfClosingTags(refitTags(dom.window.document.body.innerHTML));
@@ -145,15 +147,13 @@ fs.readFile(sourceFile, 'utf8', async (err, content) => {
         await emplaceStyle(updatedStyle, processingParams);
         await emplaceTitle(pageTitle, processingParams);
         await emplaceMetas(pageMetas, processingParams);
-        await emplaceLinks(pageLinks, processingParams);
+        await emplaceLinks(updatedLinks, processingParams);
         await addScripts(scripts, processingParams);
         await emplaceHTML(rawHTML, processingParams);
 
         await fixupWebpack(processingParams);
 
-        await removeUnusedTags(
-            processingParams,
-            {...(indexer?.saved ?? {}), ...(styleIndexer?.saved ?? {})});
+        await removeUnusedTags(processingParams, indexerStageC.saved ?? {});
     } catch (err) {
         logger.error(err);
         await cleanOldFiles();
@@ -202,6 +202,7 @@ function buildPathTemplateFrom(dir) {
 async function addScripts(scripts, resourcePath) {
     const {publicB, srcB}       = resourcePath;
     const conventionScriptPaths = buildAssetLookup();
+    const {useHooks}            = converterConfig;
     scripts.map(script => {
         const scriptInfo = parseFile(script.scriptName);
         const conventionalScriptPath =
@@ -215,7 +216,7 @@ async function addScripts(scripts, resourcePath) {
     });
     const useScripts = scripts.filter(script => script.isInline);
 
-    if (isEmpty(useScripts)) {
+    if (isEmpty(useScripts) && !useHooks) {
         await removeHooks('*', resourcePath);
     } else {
         await Promise.all(useScripts.map(async (script) => {
@@ -264,18 +265,13 @@ function joinAttrs(attrs, extras) {
 }
 
 async function emplaceHooks(scripts, resourcePath) {
-    const scriptBasename = path.basename(scriptsFullPath);
-    const scriptsList    = scripts.reduce(
-           (acc, script) => acc + '\'' +
-               (!script.isInline ?
-                    script.scriptName :
-                    path.join(path.basename(script.path), script.scriptName)) +
-               '\'' +
-               ',\n\t',
-           '\n\t');
+    const scriptsList = scripts.reduce(
+        (acc, script) => acc + '\'' + script.scriptName + '\'' +
+            ',\n\t',
+        '\n\t');
     const hook =
         `\n\tconst [loadedScripts, error] = useScript([${scriptsList}]);`;
-    const include = `\nimport './hooks/useScript';`;
+    const include = `\nimport useScript from './hooks/useScript';`;
 
     const {app, appB} = resourcePath;
     await emplaceImpl(HOOKS_TAG, appB, appB, hook);
@@ -477,6 +473,27 @@ function clip(str, maxLen) {
     return clippedStr.length === str.length ? clippedStr : clippedStr + '...';
 }
 
+async function updateLinksFromLinksContent(doc, resourcePath, indexer, links) {
+    const {publicB} = resourcePath;
+
+    for (const link of links) {
+        if (isAbsoluteURI(link.href))
+            continue;
+
+        const linkFullPath = path.join(publicB, link.href);
+        try {
+            let content = (await fsp.readFile(linkFullPath)).toString();
+            [content, indexer] =
+                await updateStyleLinks(doc, resourcePath, indexer, content);
+            await     fsp.writeFile(linkFullPath, content);
+
+        } catch (err) {
+            console.error(err);
+        };
+    }
+    return [links, indexer];
+}
+
 async function updateStyleLinks(doc, resourcePath, indexer, style) {
     const fixables = Array.from(style.matchAll(/url\s*\(([^\)]+)\)/gm))
                          .sort((one, other) => other.index - one.index)
@@ -485,11 +502,12 @@ async function updateStyleLinks(doc, resourcePath, indexer, style) {
                          });
 
     if (isEmpty(fixables)) {
-        return ['', {}];
+        return [style, indexer];
     }
 
     const links = fixables.map(
         (link, index) => ({value: unQuote(link[1]), recovery: index}));
+
     const [resolvedAssetsPath, _] =
         await retrieveAssetsFromGlobalDirectory(links, indexer);
 
@@ -512,7 +530,11 @@ async function updateStyleLinks(doc, resourcePath, indexer, style) {
 }
 
 function unQuote(link) {
-    return link.trim().slice(1, -1);
+    const q = ['"', '\'', '`'];
+    link    = link.trim();
+    return link.slice(
+        q.includes(link[0]) * 1,
+        [link.length, -1].at(q.includes(lastEntry(link))));
 }
 
 async function updateMissingLinks(doc, resourcePath) {
@@ -597,7 +619,7 @@ async function copyResolvedAssetsToOutputDirectory(
 function generateAssetsFinalDirectory(assetBundle) {
     const {usePathRelativeIndex} = converterConfig;
     const asset                  = parseFile(assetBundle.value);
-    const assetDir               = path.normalize(asset.dir);
+    const assetDir               = removeBackLinks(path.normalize(asset.dir));
     if (usePathRelativeIndex && isNotEmpty(assetDir)) {
         return assetDir;
     }
@@ -609,6 +631,10 @@ function generateAssetsFinalDirectory(assetBundle) {
     }
 
     return assetDir;
+}
+
+function removeBackLinks(dir) {
+    return dir.replace(/(?:\.\.\/?)*/gm, '');
 }
 
 async function retrieveAssetsFromGlobalDirectory(assetsList, indexer) {
@@ -626,7 +652,6 @@ async function retrieveAssetsFromGlobalDirectory(assetsList, indexer) {
     const [globalAssetsPath, directoryIDX] = isEmpty(Object.keys(dirIDX)) ?
         await resolveGlobalAssetsPath(excludePattern) :
         [savedGlobalAssetsPath, dirIDX];
-
 
     if (isEmpty(Object.keys(directoryIDX)))
         return [requestedAssetsResolvedPath, directoryIDX];
@@ -674,7 +699,9 @@ async function retrieveAssetsFromGlobalDirectory(assetsList, indexer) {
             } else {
                 console.info(
                     '\nThe file found at', providedAsset.realpath,
-                    '\nhas been selected as a match for the file:', base);
+                    '\nhas been selected as a match for the file:', base,
+                    isNotNull(providedAsset.version) ? ', with version:' : '',
+                    providedAsset.version ?? '');
                 requestedAssetsResolvedPath[asset] = providedAsset;
             }
         } else if (!isSelfReference(base)) {
@@ -877,7 +904,7 @@ function mimeDB() {
 }
 
 function isVersioned(file) {
-    return file.search(/v\d+(\.\d+)*.+/) !== -1;
+    return file.search(/v.*?\d+(?:\.\d+)*.*/) !== -1;
 }
 
 async function initializeProjectStructure() {
@@ -1318,6 +1345,8 @@ function shiftByAttrs(page, off) {
             return off;
     } while (off < pageLen);
 }
+
+var supportedFonts = ['ttf', 'otf', 'woff', 'woff2', 'eot'];
 
 var metaTags = [
     {name: 'viewport', content: 'width=device-width, initial-scale='}, {
