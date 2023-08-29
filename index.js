@@ -46,6 +46,8 @@ const assert = require('assert');
 
 const REPL_ID = 'hTmL';
 
+modifyLock(REPL_ID);
+
 const STYLE_TAG = 'STYLE_CONTENT';
 const APP_TAG   = 'APP_CONTENT';
 const HOOKS_TAG = 'HOOKS_CONTENT';
@@ -53,11 +55,18 @@ const TITLE_TAG = 'TITLE_CONTENT';
 const META_TAG  = 'META_CONTENT';
 const LINK_TAG  = 'LINK_CONTENT';
 
+modifyLock(
+    REPL_ID, STYLE_TAG, APP_TAG, HOOKS_TAG, TITLE_TAG, META_TAG, LINK_TAG);
+
 const STYLE_INC_TAG  = 'STYLE_INCLUDE';
 const HOOKS_INC_TAG  = 'HOOKS_INCLUDE';
 const SCRIPT_INC_TAG = 'SCRIPT_INCLUDE';
 
+modifyLock(STYLE_INC_TAG, HOOKS_INC_TAG, SCRIPT_INC_TAG);
+
 const ROOT_ATTR_TAG = 'ROOT_ATTRIBUTES';
+
+modifyLock(ROOT_ATTR_TAG);
 
 const BUILD_DIR_TAG      = 'BUILD_DIR';
 const ENV_PRE_TAG        = 'ENV_PRESENT';
@@ -65,9 +74,15 @@ const ASSETS_DIR_TAG     = 'ASSETS_DIR';
 const ASSETS_PRESENT_TAG = 'ASSET_PRESENT';
 const FAVICON_DIR_TAG    = 'FAVICON_DIR';
 
+modifyLock(
+    BUILD_DIR_TAG, ENV_PRE_TAG, ASSETS_DIR_TAG, ASSETS_PRESENT_TAG,
+    FAVICON_DIR_TAG);
+
 const BUILD_DIR  = 'build';
 const HOOKS_DIR  = 'hooks';
 const ASSETS_DIR = 'assets';
+
+modifyLock(BUILD_DIR, HOOKS_DIR, ASSETS_DIR);
 
 const converterConfig = {
     useHooks: false,
@@ -76,6 +91,9 @@ const converterConfig = {
     usePathRelativeIndex: true,
     archive: false
 };
+
+// Make it unmodifiable.
+modifyLock(converterConfig);
 
 // Logger setup
 const logger = winston.createLogger({
@@ -110,6 +128,8 @@ function serializeError(error) {
 
 const sourceFile = process.argv[2] ?? 'examples/index.html';
 const sourceDir  = path.dirname(sourceFile);
+
+modifyLock(sourceFile, sourceDir);
 
 fs.readFile(sourceFile, 'utf8', async (err, content) => {
     if (err) {
@@ -164,7 +184,7 @@ fs.readFile(sourceFile, 'utf8', async (err, content) => {
 
         await fixupWebpack(processingParams);
 
-        await removeUnusedTags(processingParams, indexerStageC.saved ?? {});
+        await removeUnusedTags(processingParams, indexerStageC?.saved ?? {});
     } catch (err) {
         logger.error(err);
         await cleanOldFiles();
@@ -182,6 +202,11 @@ function deepClone(str) {
 
 async function removeUnusedTags(resourcePath, assetsList) {
     const {appB, scriptB, rootB, publicB, webpackB} = resourcePath;
+    assert(isDefined(appB));
+    assert(isDefined(scriptB));
+    assert(isDefined(rootB));
+    assert(isDefined(publicB));
+    assert(isDefined(webpackB));
 
     logger.info('resourcePath', resourcePath);
     await emplaceImpl(STYLE_INC_TAG, appB, appB, '');
@@ -218,6 +243,11 @@ async function addScripts(scripts, resourcePath) {
     const {publicB, srcB}       = resourcePath;
     const conventionScriptPaths = buildAssetLookup();
     const {useHooks}            = converterConfig;
+
+    assert(isDefined(publicB));
+    assert(isDefined(srcB));
+    assert(isDefined(useHooks) && isBoolean(useHooks));
+
     scripts.map(script => {
         const scriptInfo = parseFile(script.scriptName);
         const conventionalScriptPath =
@@ -266,11 +296,15 @@ async function emplaceInRoot(scripts, resourcePath) {
             .trimEnd();
 
     const {rootB} = resourcePath;
+    assert(isDefined(rootB));
+
     await emplaceImpl(SCRIPT_INC_TAG, rootB, rootB, scriptsList);
     await removeHooks('*', resourcePath);
 }
 
-function joinAttrs(attrs, extras) {
+function joinAttrs(attrs, extras /* nullable */) {
+    assert(isDefined(attrs) && isObject(attrs));
+
     return Object.entries({...attrs, ...extras})
         .reduce(
             (acc, [k, v]) =>
@@ -289,11 +323,16 @@ async function emplaceHooks(scripts, resourcePath) {
     const include = `\nimport useScript from './hooks/useScript';`;
 
     const {app, appB} = resourcePath;
+    assert(isDefined(app));
+    assert(isDefined(appB));
+
     await emplaceImpl(HOOKS_TAG, appB, appB, hook);
     await emplaceImpl(HOOKS_INC_TAG, appB, appB, include);
 }
 
 async function removeHooks(hooks, resourcePath) {
+    assert(isDefined(resourcePath.srcB));
+
     const removeAllHooks = !Array.isArray(hooks);
     const hooksFullPath  = path.join(resourcePath.srcB, HOOKS_DIR);
     if (removeAllHooks) {
@@ -305,8 +344,9 @@ async function removeHooks(hooks, resourcePath) {
         });
     }
 }
-
 async function deleteFilesMatch(root, pattern) {
+    assert(isRegExp(pattern));
+
     (await fsp.readdir(root)).forEach((file) => {
         const filePath = path.join(root, file);
         const stat     = fs.statSync(filePath);
@@ -322,9 +362,12 @@ async function deleteFilesMatch(root, pattern) {
 async function emplaceRootAttrs(node, resourcePath) {
     const {rootB} = resourcePath;
     const attrs   = joinAttrs(getAttributesRaw(node));
+    assert(isDefined(rootB));
+    assert(isString(attrs));
 
-    if (isNotEmpty(attrs))
+    if (isNotEmpty(attrs)) {
         await emplaceImpl(ROOT_ATTR_TAG, rootB, rootB, ' ' + attrs);
+    }
 }
 
 async function emplaceLinks(links, processingParams) {
@@ -389,11 +432,15 @@ async function updateFaviconAddress(newFavicon, oldFavicon, resourcePath) {
     assert(
         oldFavicon && oldFavicon.href &&
         oldFavicon.href.indexOf('favicon') !== -1 && oldFavicon.rel === 'icon');
-    assert(Object.keys(resourcePath).length !== 0);
+    assert(isNotEmpty(Object.keys(resourcePath)));
 
     const {publicB, webpackB} = resourcePath;
-    const oldFaviconFile      = path.join(publicB, oldFavicon.href);
-    const newFaviconFile      = path.join(publicB, newFavicon.href);
+
+    assert(isDefined(publicB));
+    assert(isDefined(webpackB));
+
+    const oldFaviconFile = path.join(publicB, oldFavicon.href);
+    const newFaviconFile = path.join(publicB, newFavicon.href);
 
     try {
         if (fs.existsSync(newFaviconFile)) {
@@ -415,11 +462,19 @@ async function updateFaviconAddress(newFavicon, oldFavicon, resourcePath) {
 async function emplaceTitle(title, processingParams) {
     const {rootB} = processingParams;
 
+    assert(isDefined(rootB));
+
     await emplaceImpl(TITLE_TAG, rootB, rootB, title);
 }
 
 async function emplaceStyle(content, resourcePath) {
     const {style, styleB, appB, scriptB} = resourcePath;
+
+    assert(isDefined(style));
+    assert(isDefined(styleB));
+    assert(isDefined(appB));
+    assert(isDefined(scriptB));
+
     if (isEmpty(content)) {
         try {
             logger.info('emplaceStyle() -- isEmpty(content): ', styleB);
@@ -439,6 +494,9 @@ async function emplaceStyle(content, resourcePath) {
 async function fixupWebpack(resourcePath) {
     const {webpackB, publicB} = resourcePath;
 
+    assert(isDefined(webpackB));
+    assert(isDefined(publicB));
+
     const envFile                = '.env';
     const envProposedFullPath    = path.join(sourceDir, envFile);
     const envDestinationFullPath = path.join(bt(publicB), envFile);
@@ -452,20 +510,32 @@ async function fixupWebpack(resourcePath) {
 }
 
 function bt(dir) {
+    assert(isDefined(dir) && isString(dir));
+
     return path.join(dir, '..');
 }
 
 async function emplaceHTML(rawHTML, resourcePath) {
     const {app, appB} = resourcePath;
 
+    assert(isDefined(app));
+    assert(isDefined(appB));
+
     await emplaceImpl(APP_TAG, appB, appB, useJSXStyleComments(rawHTML));
 }
 
 function useJSXStyleComments(rawHTML) {
+    assert(isDefined(rawHTML) && isString(rawHTML));
+
     return rawHTML.replace(/<!--((?:.|\n|\r)*?)-->/gm, '{/*\$1*/}');
 }
 
 async function emplaceImpl(tag, readPath, writePath, replacement) {
+    assert(isString(tag) && isNotEmpty(tag));
+    assert(isString(readPath) && isNotEmpty(readPath));
+    assert(isString(writePath) && isNotEmpty(writePath));
+    assert(isString(replacement));
+
     const content = await fsp.readFile(readPath);
 
     logger.info('Args:');
@@ -490,6 +560,8 @@ function clip(str, maxLen) {
 
 async function updateLinksFromLinksContent(doc, resourcePath, indexer, links) {
     const {publicB} = resourcePath;
+
+    assert(isDefined(publicB));
 
     for (const link of links) {
         if (isAbsoluteURI(link.href))
@@ -607,6 +679,9 @@ async function copyResolvedAssetsToOutputDirectory(
     const {publicB}              = resourcePath;
     const {usePathRelativeIndex} = converterConfig;
 
+    assert(isDefined(publicB));
+    assert(isBoolean(usePathRelativeIndex));
+
     const assetDirLookup = buildAssetLookup();
     for (const asset of assetsList) {
         const repl = resolvedAssetsPath[asset.value];
@@ -632,9 +707,14 @@ async function copyResolvedAssetsToOutputDirectory(
 }
 
 function generateAssetsFinalDirectory(assetBundle) {
+    assert(isDefined(assetBundle) && isDefined(assetBundle.value));
+
     const {usePathRelativeIndex} = converterConfig;
     const asset                  = parseFile(assetBundle.value);
     const assetDir               = removeBackLinks(path.normalize(asset.dir));
+
+    assert(isBoolean(usePathRelativeIndex));
+
     if (usePathRelativeIndex && isNotEmpty(assetDir)) {
         return assetDir;
     }
@@ -648,6 +728,13 @@ function generateAssetsFinalDirectory(assetBundle) {
     return assetDir;
 }
 
+/*\
+ * Since we are changing the destination
+ * of the asset from what was originally
+ * provided, all backward references of
+ * the form ../../ ... has to be removed
+ * so as to correctly resolve the path.
+\*/
 function removeBackLinks(dir) {
     return dir.replace(/(?:\.\.\/?)*/gm, '');
 }
@@ -655,8 +742,8 @@ function removeBackLinks(dir) {
 async function retrieveAssetsFromGlobalDirectory(assetsList, indexer) {
     // Preconditions
     assert(Array.isArray(assetsList));
-    assert(indexer.re instanceof RegExp);
-    assert(typeof indexer.depth === 'number');
+    isRegExp(assert(indexer.re));
+    assert(isNumber(indexer.depth));
 
     const dirIDX                = indexer.saved;
     const excludePattern        = indexer.re;
@@ -1253,6 +1340,32 @@ function formatStyle(value) {
     return `{{${allStyles.join(', ')}}}`;
 }
 
+function modifyLock() {
+    for (const arg of arguments) {
+        Object.freeze(arg);
+    }
+}
+
+function isString(any) {
+    return typeof any === 'string';
+}
+
+function isBoolean(any) {
+    return typeof any === 'boolean';
+}
+
+function isNumber(any) {
+    return typeof any === 'number';
+}
+
+function isObject(any) {
+    return typeof any === 'object';
+}
+
+function isRegExp(any) {
+    return any instanceof RegExp;
+}
+
 function isNotEmpty(list) {
     return !isEmpty(list);
 }
@@ -1267,6 +1380,10 @@ function isBehaved(any) {
 
 function isNotBehaved(any) {
     return !isBehaved(any);
+}
+
+function isDefined(any) {
+    return isBehaved(any) && isNotNull(any);
 }
 
 function isNull(any) {
@@ -1510,3 +1627,7 @@ var reactAttributesLookup = {
     'wmode': {react: 'wmode', type: 'text'},
     'wrap': {react: 'wrap', type: 'text'}
 };
+
+modifyLock(
+    supportedFonts, metaTags, linkTags, projectDependencyInjectionTags,
+    selfClosingTags, reactAttributesLookup);
