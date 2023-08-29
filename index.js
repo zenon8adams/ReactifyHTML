@@ -92,9 +92,20 @@ const logger = winston.createLogger({
 });
 
 const {error, warn, info, verbose, debug, silly} = logger;
-logger.info =
-    function() {
+
+logger.info = function() {
     info(util.format.apply(null, arguments));
+};
+
+logger.error =
+    function() {
+    error(serializeError(arguments[0]));
+}
+
+function serializeError(error) {
+    // Deep copy the string since nodejs doesn't want to
+    // display the error detail as string
+    return deepClone(error.stack);
 }
 
 const sourceFile = process.argv[2] ?? 'examples/index.html';
@@ -164,6 +175,10 @@ fs.readFile(sourceFile, 'utf8', async (err, content) => {
 
     process.exit(0);
 });
+
+function deepClone(str) {
+    return (' ' + str).slice(1);
+}
 
 async function removeUnusedTags(resourcePath, assetsList) {
     const {appB, scriptB, rootB, publicB, webpackB} = resourcePath;
