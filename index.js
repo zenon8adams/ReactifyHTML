@@ -2,7 +2,7 @@
  * MIT License
  *
  *
- *   Copyright (c) 2023 Adesina Meekness
+ *   Copyright (c) 2023 Meekness Adesina
  *
  *   Permission is hereby granted, free of charge, to any person obtaining a
  *   copy of this software and associated documentation files (the "Software"),
@@ -46,6 +46,8 @@ const assert = require('assert');
 
 const REPL_ID = 'hTmL';
 
+modifyLock(REPL_ID);
+
 const STYLE_TAG = 'STYLE_CONTENT';
 const APP_TAG   = 'APP_CONTENT';
 const HOOKS_TAG = 'HOOKS_CONTENT';
@@ -53,11 +55,18 @@ const TITLE_TAG = 'TITLE_CONTENT';
 const META_TAG  = 'META_CONTENT';
 const LINK_TAG  = 'LINK_CONTENT';
 
+modifyLock(
+    REPL_ID, STYLE_TAG, APP_TAG, HOOKS_TAG, TITLE_TAG, META_TAG, LINK_TAG);
+
 const STYLE_INC_TAG  = 'STYLE_INCLUDE';
 const HOOKS_INC_TAG  = 'HOOKS_INCLUDE';
 const SCRIPT_INC_TAG = 'SCRIPT_INCLUDE';
 
+modifyLock(STYLE_INC_TAG, HOOKS_INC_TAG, SCRIPT_INC_TAG);
+
 const ROOT_ATTR_TAG = 'ROOT_ATTRIBUTES';
+
+modifyLock(ROOT_ATTR_TAG);
 
 const BUILD_DIR_TAG      = 'BUILD_DIR';
 const ENV_PRE_TAG        = 'ENV_PRESENT';
@@ -65,9 +74,15 @@ const ASSETS_DIR_TAG     = 'ASSETS_DIR';
 const ASSETS_PRESENT_TAG = 'ASSET_PRESENT';
 const FAVICON_DIR_TAG    = 'FAVICON_DIR';
 
+modifyLock(
+    BUILD_DIR_TAG, ENV_PRE_TAG, ASSETS_DIR_TAG, ASSETS_PRESENT_TAG,
+    FAVICON_DIR_TAG);
+
 const BUILD_DIR  = 'build';
 const HOOKS_DIR  = 'hooks';
 const ASSETS_DIR = 'assets';
+
+modifyLock(BUILD_DIR, HOOKS_DIR, ASSETS_DIR);
 
 const converterConfig = {
     useHooks: false,
@@ -76,6 +91,9 @@ const converterConfig = {
     usePathRelativeIndex: true,
     archive: false
 };
+
+// Make it unmodifiable.
+modifyLock(converterConfig);
 
 // Logger setup
 const logger = winston.createLogger({
@@ -92,13 +110,26 @@ const logger = winston.createLogger({
 });
 
 const {error, warn, info, verbose, debug, silly} = logger;
-logger.info =
-    function() {
+
+logger.info = function() {
     info(util.format.apply(null, arguments));
+};
+
+logger.error =
+    function() {
+    error(serializeError(arguments[0]));
+}
+
+function serializeError(error) {
+    // Deep copy the string since nodejs doesn't want to
+    // display the error detail as string
+    return deepClone(error.stack);
 }
 
 const sourceFile = process.argv[2] ?? 'examples/index.html';
 const sourceDir  = path.dirname(sourceFile);
+
+modifyLock(sourceFile, sourceDir);
 
 fs.readFile(sourceFile, 'utf8', async (err, content) => {
     if (err) {
@@ -130,13 +161,15 @@ fs.readFile(sourceFile, 'utf8', async (err, content) => {
         const scripts    = extractAllScripts(doc, root);
         const pageStyles = extractStyles(doc, root);
 
-        const     indexer =
+        const     indexerStageA =
             await updateMissingLinks(doc, processingParams, pageLinks, scripts);
-        const [updatedStyle, styleIndexer] =
-            await updateStyleLinks(doc, processingParams, indexer, pageStyles);
+        const [updatedLinks, indexerStageB] = await updateLinksFromLinksContent(
+            doc, processingParams, indexerStageA, pageLinks);
+        const [updatedStyle, indexerStageC] = await updateStyleLinks(
+            doc, processingParams, indexerStageB, pageStyles);
 
-        const rawHTML = closeSelfClosingTags(
-            adjustHTML(dom.window.document.body.innerHTML));
+        const rawHTML =
+            closeSelfClosingTags(refitTags(dom.window.document.body.innerHTML));
 
         logger.info('All scripts: ', scripts);
         logger.info('All styles: ', pageStyles);
@@ -145,15 +178,13 @@ fs.readFile(sourceFile, 'utf8', async (err, content) => {
         await emplaceStyle(updatedStyle, processingParams);
         await emplaceTitle(pageTitle, processingParams);
         await emplaceMetas(pageMetas, processingParams);
-        await emplaceLinks(pageLinks, processingParams);
+        await emplaceLinks(updatedLinks, processingParams);
         await addScripts(scripts, processingParams);
         await emplaceHTML(rawHTML, processingParams);
 
         await fixupWebpack(processingParams);
 
-        await removeUnusedTags(
-            processingParams,
-            {...(indexer?.saved ?? {}), ...(styleIndexer?.saved ?? {})});
+        await removeUnusedTags(processingParams, indexerStageC?.saved ?? {});
     } catch (err) {
         logger.error(err);
         await cleanOldFiles();
@@ -165,8 +196,17 @@ fs.readFile(sourceFile, 'utf8', async (err, content) => {
     process.exit(0);
 });
 
+function deepClone(str) {
+    return (' ' + str).slice(1);
+}
+
 async function removeUnusedTags(resourcePath, assetsList) {
     const {appB, scriptB, rootB, publicB, webpackB} = resourcePath;
+    assert(isDefined(appB));
+    assert(isDefined(scriptB));
+    assert(isDefined(rootB));
+    assert(isDefined(publicB));
+    assert(isDefined(webpackB));
 
     logger.info('resourcePath', resourcePath);
     await emplaceImpl(STYLE_INC_TAG, appB, appB, '');
@@ -202,6 +242,12 @@ function buildPathTemplateFrom(dir) {
 async function addScripts(scripts, resourcePath) {
     const {publicB, srcB}       = resourcePath;
     const conventionScriptPaths = buildAssetLookup();
+    const {useHooks}            = converterConfig;
+
+    assert(isDefined(publicB));
+    assert(isDefined(srcB));
+    assert(isDefined(useHooks) && isBoolean(useHooks));
+
     scripts.map(script => {
         const scriptInfo = parseFile(script.scriptName);
         const conventionalScriptPath =
@@ -215,7 +261,7 @@ async function addScripts(scripts, resourcePath) {
     });
     const useScripts = scripts.filter(script => script.isInline);
 
-    if (isEmpty(useScripts)) {
+    if (isEmpty(useScripts) && !useHooks) {
         await removeHooks('*', resourcePath);
     } else {
         await Promise.all(useScripts.map(async (script) => {
@@ -235,51 +281,58 @@ async function emplaceInRoot(scripts, resourcePath) {
             .reduce(
                 (acc, script) => {
                     if (!script.isInline) {
-                        const attrs = joinAttrs(
+                        const attrs = refitTags(joinAttrs(
                             getAttributesRaw(script.script),
-                            {src: script.scriptName});
+                            {src: script.scriptName}));
                         return acc + `<script ${attrs}></script>` +
                             '\n\t';
                     } else {
-                        return acc + '<script src=\'' +
+                        return acc + '<script src="' +
                             path.join(script.shortPath, script.scriptName) +
-                            '\' type=\'' + script.mime + '\'></script>\n\t';
+                            '" type="' + script.mime + '"></script>\n\t';
                     }
                 },
                 '\n\t')
             .trimEnd();
 
     const {rootB} = resourcePath;
+    assert(isDefined(rootB));
+
     await emplaceImpl(SCRIPT_INC_TAG, rootB, rootB, scriptsList);
     await removeHooks('*', resourcePath);
 }
 
-function joinAttrs(attrs, extras) {
+function joinAttrs(attrs, extras /* nullable */) {
+    assert(isDefined(attrs) && isObject(attrs));
+
     return Object.entries({...attrs, ...extras})
-        .reduce((acc, [k, v]) => acc + k + '=\'' + v + '\' ', '')
+        .reduce(
+            (acc, [k, v]) =>
+                acc + k + (isNotEmpty(v) ? ('="' + v + '" ') : ' '),
+            '')
         .trim();
 }
 
 async function emplaceHooks(scripts, resourcePath) {
-    const scriptBasename = path.basename(scriptsFullPath);
-    const scriptsList    = scripts.reduce(
-           (acc, script) => acc + '\'' +
-               (!script.isInline ?
-                    script.scriptName :
-                    path.join(path.basename(script.path), script.scriptName)) +
-               '\'' +
-               ',\n\t',
-           '\n\t');
+    const scriptsList = scripts.reduce(
+        (acc, script) => acc + '\'' + script.scriptName + '\'' +
+            ',\n\t',
+        '\n\t');
     const hook =
         `\n\tconst [loadedScripts, error] = useScript([${scriptsList}]);`;
-    const include = `\nimport './hooks/useScript';`;
+    const include = `\nimport useScript from './hooks/useScript';`;
 
     const {app, appB} = resourcePath;
+    assert(isDefined(app));
+    assert(isDefined(appB));
+
     await emplaceImpl(HOOKS_TAG, appB, appB, hook);
     await emplaceImpl(HOOKS_INC_TAG, appB, appB, include);
 }
 
 async function removeHooks(hooks, resourcePath) {
+    assert(isDefined(resourcePath.srcB));
+
     const removeAllHooks = !Array.isArray(hooks);
     const hooksFullPath  = path.join(resourcePath.srcB, HOOKS_DIR);
     if (removeAllHooks) {
@@ -291,8 +344,9 @@ async function removeHooks(hooks, resourcePath) {
         });
     }
 }
-
 async function deleteFilesMatch(root, pattern) {
+    assert(isRegExp(pattern));
+
     (await fsp.readdir(root)).forEach((file) => {
         const filePath = path.join(root, file);
         const stat     = fs.statSync(filePath);
@@ -308,9 +362,12 @@ async function deleteFilesMatch(root, pattern) {
 async function emplaceRootAttrs(node, resourcePath) {
     const {rootB} = resourcePath;
     const attrs   = joinAttrs(getAttributesRaw(node));
+    assert(isDefined(rootB));
+    assert(isString(attrs));
 
-    if (isNotEmpty(attrs))
+    if (isNotEmpty(attrs)) {
         await emplaceImpl(ROOT_ATTR_TAG, rootB, rootB, ' ' + attrs);
+    }
 }
 
 async function emplaceLinks(links, processingParams) {
@@ -375,11 +432,15 @@ async function updateFaviconAddress(newFavicon, oldFavicon, resourcePath) {
     assert(
         oldFavicon && oldFavicon.href &&
         oldFavicon.href.indexOf('favicon') !== -1 && oldFavicon.rel === 'icon');
-    assert(Object.keys(resourcePath).length !== 0);
+    assert(isNotEmpty(Object.keys(resourcePath)));
 
     const {publicB, webpackB} = resourcePath;
-    const oldFaviconFile      = path.join(publicB, oldFavicon.href);
-    const newFaviconFile      = path.join(publicB, newFavicon.href);
+
+    assert(isDefined(publicB));
+    assert(isDefined(webpackB));
+
+    const oldFaviconFile = path.join(publicB, oldFavicon.href);
+    const newFaviconFile = path.join(publicB, newFavicon.href);
 
     try {
         if (fs.existsSync(newFaviconFile)) {
@@ -401,11 +462,19 @@ async function updateFaviconAddress(newFavicon, oldFavicon, resourcePath) {
 async function emplaceTitle(title, processingParams) {
     const {rootB} = processingParams;
 
+    assert(isDefined(rootB));
+
     await emplaceImpl(TITLE_TAG, rootB, rootB, title);
 }
 
 async function emplaceStyle(content, resourcePath) {
     const {style, styleB, appB, scriptB} = resourcePath;
+
+    assert(isDefined(style));
+    assert(isDefined(styleB));
+    assert(isDefined(appB));
+    assert(isDefined(scriptB));
+
     if (isEmpty(content)) {
         try {
             logger.info('emplaceStyle() -- isEmpty(content): ', styleB);
@@ -425,6 +494,9 @@ async function emplaceStyle(content, resourcePath) {
 async function fixupWebpack(resourcePath) {
     const {webpackB, publicB} = resourcePath;
 
+    assert(isDefined(webpackB));
+    assert(isDefined(publicB));
+
     const envFile                = '.env';
     const envProposedFullPath    = path.join(sourceDir, envFile);
     const envDestinationFullPath = path.join(bt(publicB), envFile);
@@ -438,20 +510,32 @@ async function fixupWebpack(resourcePath) {
 }
 
 function bt(dir) {
+    assert(isDefined(dir) && isString(dir));
+
     return path.join(dir, '..');
 }
 
 async function emplaceHTML(rawHTML, resourcePath) {
     const {app, appB} = resourcePath;
 
+    assert(isDefined(app));
+    assert(isDefined(appB));
+
     await emplaceImpl(APP_TAG, appB, appB, useJSXStyleComments(rawHTML));
 }
 
 function useJSXStyleComments(rawHTML) {
+    assert(isDefined(rawHTML) && isString(rawHTML));
+
     return rawHTML.replace(/<!--((?:.|\n|\r)*?)-->/gm, '{/*\$1*/}');
 }
 
 async function emplaceImpl(tag, readPath, writePath, replacement) {
+    assert(isString(tag) && isNotEmpty(tag));
+    assert(isString(readPath) && isNotEmpty(readPath));
+    assert(isString(writePath) && isNotEmpty(writePath));
+    assert(isString(replacement));
+
     const content = await fsp.readFile(readPath);
 
     logger.info('Args:');
@@ -474,6 +558,29 @@ function clip(str, maxLen) {
     return clippedStr.length === str.length ? clippedStr : clippedStr + '...';
 }
 
+async function updateLinksFromLinksContent(doc, resourcePath, indexer, links) {
+    const {publicB} = resourcePath;
+
+    assert(isDefined(publicB));
+
+    for (const link of links) {
+        if (isAbsoluteURI(link.href))
+            continue;
+
+        const linkFullPath = path.join(publicB, link.href);
+        try {
+            let content = (await fsp.readFile(linkFullPath)).toString();
+            [content, indexer] =
+                await updateStyleLinks(doc, resourcePath, indexer, content);
+            await     fsp.writeFile(linkFullPath, content);
+
+        } catch (err) {
+            console.error(err);
+        };
+    }
+    return [links, indexer];
+}
+
 async function updateStyleLinks(doc, resourcePath, indexer, style) {
     const fixables = Array.from(style.matchAll(/url\s*\(([^\)]+)\)/gm))
                          .sort((one, other) => other.index - one.index)
@@ -482,11 +589,12 @@ async function updateStyleLinks(doc, resourcePath, indexer, style) {
                          });
 
     if (isEmpty(fixables)) {
-        return ['', {}];
+        return [style, indexer];
     }
 
     const links = fixables.map(
         (link, index) => ({value: unQuote(link[1]), recovery: index}));
+
     const [resolvedAssetsPath, _] =
         await retrieveAssetsFromGlobalDirectory(links, indexer);
 
@@ -496,7 +604,6 @@ async function updateStyleLinks(doc, resourcePath, indexer, style) {
         const patch = resolvedAssetsPath[link.value];
         if (isNotBehaved(patch))
             continue;
-
 
         const finalDir       = generateAssetsFinalDirectory(link);
         const assetsRealPath = path.join(ASSETS_DIR, finalDir);
@@ -510,7 +617,11 @@ async function updateStyleLinks(doc, resourcePath, indexer, style) {
 }
 
 function unQuote(link) {
-    return link.trim().slice(1, -1);
+    const q = ['"', '\'', '`'];
+    link    = link.trim();
+    return link.slice(
+        q.includes(link[0]) * 1,
+        [link.length, -1].at(q.includes(lastEntry(link))));
 }
 
 async function updateMissingLinks(doc, resourcePath) {
@@ -568,6 +679,9 @@ async function copyResolvedAssetsToOutputDirectory(
     const {publicB}              = resourcePath;
     const {usePathRelativeIndex} = converterConfig;
 
+    assert(isDefined(publicB));
+    assert(isBoolean(usePathRelativeIndex));
+
     const assetDirLookup = buildAssetLookup();
     for (const asset of assetsList) {
         const repl = resolvedAssetsPath[asset.value];
@@ -593,9 +707,14 @@ async function copyResolvedAssetsToOutputDirectory(
 }
 
 function generateAssetsFinalDirectory(assetBundle) {
+    assert(isDefined(assetBundle) && isDefined(assetBundle.value));
+
     const {usePathRelativeIndex} = converterConfig;
     const asset                  = parseFile(assetBundle.value);
-    const assetDir               = path.normalize(asset.dir);
+    const assetDir               = removeBackLinks(path.normalize(asset.dir));
+
+    assert(isBoolean(usePathRelativeIndex));
+
     if (usePathRelativeIndex && isNotEmpty(assetDir)) {
         return assetDir;
     }
@@ -609,11 +728,22 @@ function generateAssetsFinalDirectory(assetBundle) {
     return assetDir;
 }
 
+/*\
+ * Since we are changing the destination
+ * of the asset from what was originally
+ * provided, all backward references of
+ * the form ../../ ... has to be removed
+ * so as to correctly resolve the path.
+\*/
+function removeBackLinks(dir) {
+    return dir.replace(/(?:\.\.\/?)*/gm, '');
+}
+
 async function retrieveAssetsFromGlobalDirectory(assetsList, indexer) {
     // Preconditions
     assert(Array.isArray(assetsList));
-    assert(indexer.re instanceof RegExp);
-    assert(typeof indexer.depth === 'number');
+    isRegExp(assert(indexer.re));
+    assert(isNumber(indexer.depth));
 
     const dirIDX                = indexer.saved;
     const excludePattern        = indexer.re;
@@ -624,7 +754,6 @@ async function retrieveAssetsFromGlobalDirectory(assetsList, indexer) {
     const [globalAssetsPath, directoryIDX] = isEmpty(Object.keys(dirIDX)) ?
         await resolveGlobalAssetsPath(excludePattern) :
         [savedGlobalAssetsPath, dirIDX];
-
 
     if (isEmpty(Object.keys(directoryIDX)))
         return [requestedAssetsResolvedPath, directoryIDX];
@@ -672,7 +801,9 @@ async function retrieveAssetsFromGlobalDirectory(assetsList, indexer) {
             } else {
                 console.info(
                     '\nThe file found at', providedAsset.realpath,
-                    '\nhas been selected as a match for the file:', base);
+                    '\nhas been selected as a match for the file:', base,
+                    isNotNull(providedAsset.version) ? ', with version:' : '',
+                    providedAsset.version ?? '');
                 requestedAssetsResolvedPath[asset] = providedAsset;
             }
         } else if (!isSelfReference(base)) {
@@ -875,7 +1006,7 @@ function mimeDB() {
 }
 
 function isVersioned(file) {
-    return file.search(/v\d+(\.\d+)*.+/) !== -1;
+    return file.search(/v.*?\d+(?:\.\d+)*.*/) !== -1;
 }
 
 async function initializeProjectStructure() {
@@ -1017,7 +1148,7 @@ function extractStyles(doc, node) {
 }
 
 function escapeAllJSXQuotes(text) {
-    return text.replace(/\{([^\}]+)\}(?!\})/gm, `{'{$1}'}`);
+    return text.replace(/(>[^\{<>]*?)\{(.+)\}/gm, `$1{'{$2}'}`);
 }
 
 function extractAllScripts(doc, node) {
@@ -1028,14 +1159,19 @@ function extractAllScripts(doc, node) {
     if (isEmpty(allScripts))
         return allScripts;
 
-    const ID   = augment('id');
-    const SRC  = augment('src');
-    const TYPE = augment('type');
+    const ID    = augment('id');
+    const SRC   = augment('src');
+    const TYPE  = augment('type');
+    const DEFER = augment('defer');
 
     const scripts = allScripts.map(script => {
         const attrs = getAttributes(script);
-        const mime  = attrs[TYPE] ?? 'text/javascript';
-        let   src   = attrs[SRC];
+        if (!attrs[DEFER]) {
+            const selection = reactAttributesLookup['defer'];
+            script.setAttributeNS(null, augment(selection.react), '');
+        }
+        const mime = attrs[TYPE] ?? 'text/javascript';
+        let   src  = attrs[SRC];
         logger.info(attrs, mime, src);
 
         const mimeDBEntry = mimeDB()[mime];
@@ -1089,7 +1225,7 @@ function randomCounter(nDigits) {
 // attributes in such case, it messes things up.
 // Replace the augmented version of the attribute
 // with the real attribute.
-function adjustHTML(semiRawHTML) {
+function refitTags(semiRawHTML) {
     return escapeAllJSXQuotes(semiRawHTML)
         .replace(new RegExp(`${REPL_ID}([a-z]+)`, 'gm'), '\$1')
         .replace(/"\{\{([^\}]+)\}\}"/g, '{{\$1}}')
@@ -1107,7 +1243,12 @@ function reconstructTree(node) {
 function modifyAttributes(node, attributes) {
     Object.keys(attributes).forEach(attr => {
         attr = attr.toLowerCase();
-        if (reactAttributesLookup[attr]) {
+        let ns;
+        if ((ns = isNamespaced(attr))) {
+            const modTag    = ns[1] + ns[2][0].toUpperCase() + ns[2].slice(1);
+            const attrValue = node.getAttribute(attr);
+            node.setAttributeNS(null, modTag, attrValue);
+        } else if (reactAttributesLookup[attr]) {
             const selection = reactAttributesLookup[attr];
             switch (selection.type) {
                 case 'boolean':
@@ -1132,6 +1273,10 @@ function modifyAttributes(node, attributes) {
             return;
         }
     });
+}
+
+function isNamespaced(attribute) {
+    return attribute.match(/^([a-z-]+):([a-z-]+)$/);
 }
 
 function augment(attr) {
@@ -1195,6 +1340,32 @@ function formatStyle(value) {
     return `{{${allStyles.join(', ')}}}`;
 }
 
+function modifyLock() {
+    for (const arg of arguments) {
+        Object.freeze(arg);
+    }
+}
+
+function isString(any) {
+    return typeof any === 'string';
+}
+
+function isBoolean(any) {
+    return typeof any === 'boolean';
+}
+
+function isNumber(any) {
+    return typeof any === 'number';
+}
+
+function isObject(any) {
+    return typeof any === 'object';
+}
+
+function isRegExp(any) {
+    return any instanceof RegExp;
+}
+
 function isNotEmpty(list) {
     return !isEmpty(list);
 }
@@ -1209,6 +1380,10 @@ function isBehaved(any) {
 
 function isNotBehaved(any) {
     return !isBehaved(any);
+}
+
+function isDefined(any) {
+    return isBehaved(any) && isNotNull(any);
 }
 
 function isNull(any) {
@@ -1302,6 +1477,8 @@ function shiftByAttrs(page, off) {
             return off;
     } while (off < pageLen);
 }
+
+var supportedFonts = ['ttf', 'otf', 'woff', 'woff2', 'eot'];
 
 var metaTags = [
     {name: 'viewport', content: 'width=device-width, initial-scale='}, {
@@ -1450,3 +1627,7 @@ var reactAttributesLookup = {
     'wmode': {react: 'wmode', type: 'text'},
     'wrap': {react: 'wrap', type: 'text'}
 };
+
+modifyLock(
+    supportedFonts, metaTags, linkTags, projectDependencyInjectionTags,
+    selfClosingTags, reactAttributesLookup);
