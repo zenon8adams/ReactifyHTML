@@ -103,6 +103,12 @@ const converterConfig = {
     archive: false
 };
 
+const MisMatchPolicy = Object.freeze({
+    Overwrite: Symbol('overwrite'),
+    Merge: Symbol('merge'),
+    Leave: Symbol('leave')
+});
+
 // Make it unmodifiable.
 modifyLock(converterConfig);
 
@@ -142,83 +148,159 @@ const mainSourceDir  = path.dirname(mainSourceFile);
 
 modifyLock(mainSourceFile, mainSourceDir);
 
-fs.readFile(mainSourceFile, 'utf8', async (err, content) => {
-    if (err) {
-        logger.error(err);
-        return;
+/*
+ * Program starting point.
+ */
+generateAllPages({href: mainSourceFile, ...parseFile(mainSourceFile), dir: ''});
+
+async function generateAllPages(landingPage) {
+    let allPageMetas = [], allStyles = '', allLinks = [], allScripts = [];
+
+    const {useHooks} = converterConfig;
+    assert(isDefined(useHooks));
+
+    // FIXME: Confirm the uniqueness property for pages (href).
+    async function generateAllPagesImpl(pages, resourcePath) {
+        let   pagesStream      = [].concat(pages);
+        let   updatedLinks     = [];
+        let   currentPageStyle = '';
+        const qLookup          = {};
+        try {
+            for (let i = 0; i < pagesStream.length; ++i) {
+                const page = pagesStream[i];
+                // Check if we have the page queued already.
+                if (qLookup[page.href]) {
+                    continue;
+                }
+
+                qLookup[page.href] = true;
+
+                const pageLocation = page?.res?.realpath ?? page.href;
+
+                logger.info(
+                    '\n\n', '='.repeat(50), pageLocation, '='.repeat(50),
+                    '\n\n');
+
+                const content = await fsp.readFile(pageLocation);
+
+                const dom  = new jsdom.JSDOM(content);
+                const doc  = dom.window.document;
+                const root = doc.querySelector('html');
+
+                /*\
+                 * We don't need edited attributes
+                 * since we know that we are not going to
+                 * be loaded in a react sensitive context
+                \*/
+
+                const pageMetas        = extractMetas(doc);
+                const currentPageLinks = extractLinks(doc);
+                const pageTitle        = extractTitle(doc, root);
+
+                const otherPages = setDifference(
+                    await extractAllPageLinks(doc, pageLocation, resourcePath),
+                    pagesStream, 'href');
+
+                reconstructTree(root);
+
+                // FIXME: Scripts can be loaded either via local hooks
+                //  or in the global index page.
+                const scripts    = extractAllScripts(doc);
+                const pageStyles = extractStyles(doc);
+
+                await updateMissingLinks(
+                    doc, pageLocation, resourcePath, currentPageLinks, scripts);
+
+                updatedLinks = await updateLinksFromLinksContent(
+                    doc, pageLocation, resourcePath, currentPageLinks);
+
+                allLinks = uniquefy(allLinks, updatedLinks, 'href');
+
+                currentPageStyle = await updateStyleLinks(
+                    doc, pageLocation, resourcePath, pageStyles);
+
+                allStyles = strJoin(allStyles, currentPageStyle, '\n');
+
+                const rawHTML = closeSelfClosingTags(
+                    refitTags(dom.window.document.body.innerHTML));
+
+                logger.info('All scripts for page:', page.realpath, scripts);
+                logger.info('All styles for page:', page.realpath, pageStyles);
+
+                const pageDescription = extractDescription(pageMetas);
+                const pageName        = deriveNameFrom(page.base);
+                const pageFile = (page?.res?.dir ?? '') + pageName + '.jsx';
+                const pageInfo = {
+                    name: pageName,
+                    title: pageTitle,
+                    description: pageDescription,
+                    path: pageFile
+                };
+
+                logger.info('PageInfo: ', pageInfo);
+
+                await duplicatePageTemplate(pageFile, resourcePath);
+                // If this is the landing page
+                if (i === 0) {
+                    await emplaceRootAttrs(root, resourcePath);
+                    await emplaceTitle(pageTitle, resourcePath);
+                }
+
+                await             emplaceHTML(rawHTML, pageInfo, resourcePath);
+                useHooks && await addScripts(scripts, pageFile, resourcePath);
+
+                Object.assign(page, {...page, info: pageInfo});
+                allScripts   = useHooks ?
+                      allScripts :
+                      uniquefy(allScripts, scripts, 'scriptName');
+                allPageMetas = allPageMetas.concat(pageMetas);
+
+                // Queue newly fetched pages to the stream.
+                pagesStream = pagesStream.concat(otherPages);
+
+                logger.info(
+                    '\n\n', '='.repeat(50), pageLocation, '='.repeat(50),
+                    '\n\n');
+            }
+        } catch (err) {
+            logger.error(err);
+        }
+
+        return pagesStream;
     }
-
-    logger.info('\n\n', '='.repeat(200), '\n\n\n');
-
-    const dom  = new jsdom.JSDOM(content);
-    const doc  = dom.window.document;
-    const root = doc.querySelector('html');
-
-    /*\
-     * We don't need edited attributes
-     * since we know that we are not going to
-     * be loaded in a react sensitive context
-    \*/
-    const pageMetas  = extractMetas(doc);
-    const pageLinks  = extractLinks(doc);
-    const pageTitle  = extractTitle(doc, root);
-    const otherPages = extractNextPageLinks(doc);
 
     try {
         await cleanOldFiles();
         const processingParams = await initializeProjectStructure();
 
-        reconstructTree(root);
+        const     allPages =
+            await generateAllPagesImpl([landingPage], processingParams);
 
-        const scripts    = extractAllScripts(doc);
-        const pageStyles = extractStyles(doc);
 
-        const indexerStageA = await updateMissingLinks(
-            doc, mainSourceFile, processingParams, pageLinks, scripts);
-        const [updatedLinks, indexerStageB] = await updateLinksFromLinksContent(
-            doc, mainSourceFile, processingParams, indexerStageA, pageLinks);
-        const [updatedStyle, indexerStageC] = await updateStyleLinks(
-            doc, mainSourceFile, processingParams, indexerStageB, pageStyles);
+        logger.info('allPages: ', allPages);
 
-        const rawHTML =
-            closeSelfClosingTags(refitTags(dom.window.document.body.innerHTML));
+        await emplaceStyle(allStyles, processingParams);
+        const appliedMetas = await emplaceMetas(allPageMetas, processingParams);
+        await                      emplaceLinks(allLinks, processingParams);
 
-        logger.info('All scripts: ', scripts);
-        logger.info('All styles: ', pageStyles);
+        !useHooks && await addScripts(allScripts, null, processingParams);
 
-        await emplaceRootAttrs(root, processingParams);
-        await emplaceStyle(updatedStyle, processingParams);
-        await emplaceTitle(pageTitle, processingParams);
-        const appliedMetas = await emplaceMetas(pageMetas, processingParams);
-        await                      emplaceLinks(updatedLinks, processingParams);
-        await                      addScripts(scripts, processingParams);
-        await emplaceHTML(rawHTML, 'LandingPage', processingParams);
-
-        const pageDescription = extractDescription(appliedMetas);
-        const pages           = [{
-                      name: 'LandingPage',
-                      title: pageTitle,
-                      description: pageDescription
-        }];
-        await emplaceApp(pages, processingParams);
+        // FIXME: getAllpages for the app.
+        await emplaceApp(allPages, processingParams);
 
         await fixupWebpack(processingParams);
 
-        await removeUnusedTags(
-            pages, indexerStageC?.saved ?? {}, processingParams);
+        await removeUnusedTags(allPages, processingParams);
 
         await removeTemplates(processingParams);
-
     } catch (err) {
         logger.error(err);
         await cleanOldFiles();
         process.exit(1);
     }
 
-    logger.info('\n\n', '='.repeat(200), '\n\n\n');
-
     process.exit(0);
-});
+}
 
 function deepClone(str) {
     return (' ' + str).slice(1);
@@ -239,7 +321,7 @@ async function removeTemplates(resourcePath) {
     await removePath(pageTemplateFullPath);
 }
 
-async function removeUnusedTags(pages, assetsList, resourcePath) {
+async function removeUnusedTags(pages, resourcePath) {
     assert(isArray(pages));
     const {appB, scriptB, rootB, publicB, pageB, webpackB} = resourcePath;
     assert(isDefined(appB));
@@ -254,7 +336,7 @@ async function removeUnusedTags(pages, assetsList, resourcePath) {
 
     for (const page of pages) {
         const {name}       = page;
-        const pageFullPath = path.join(pageB, name + '.jsx');
+        const pageFullPath = path.join(pageB, page.info.path);
         await emplaceImpl(STYLE_INC_TAG, pageFullPath, pageFullPath, '');
         await emplaceImpl(HOOKS_TAG, pageFullPath, pageFullPath, '');
         await emplaceImpl(HOOKS_INC_TAG, pageFullPath, pageFullPath, '');
@@ -271,7 +353,9 @@ async function removeUnusedTags(pages, assetsList, resourcePath) {
 
     await emplaceImpl(FAVICON_DIR_TAG, webpackB, webpackB, faviconTemplate);
 
-    const assetIsPresent = isNotEmpty(Object.keys(assetsList));
+
+    const indexer        = await getIndexer();
+    const assetIsPresent = isNotEmpty(Object.keys(indexer.saved));
     await emplaceImpl(
         ASSETS_PRESENT_TAG, webpackB, webpackB,
         assetIsPresent ? 'true' : 'false');
@@ -289,7 +373,7 @@ function buildPathTemplateFrom(dir) {
     return link;
 }
 
-async function addScripts(scripts, resourcePath) {
+async function addScripts(scripts, pagePath, resourcePath) {
     const {publicB, srcB}       = resourcePath;
     const conventionScriptPaths = buildAssetLookup();
     const {useHooks}            = converterConfig;
@@ -297,17 +381,23 @@ async function addScripts(scripts, resourcePath) {
     assert(isDefined(srcB));
     assert(isDefined(useHooks) && isBoolean(useHooks));
 
-    scripts.map(script => {
-        const scriptInfo = parseFile(script.scriptName);
-        const conventionalScriptPath =
-            conventionScriptPaths[scriptInfo.extv2] ?? 'script';
+    scripts
+        .map(script => {
+            const scriptInfo = parseFile(script.scriptName);
+            const conventionalScriptPath =
+                conventionScriptPaths[scriptInfo.extv2] ?? 'script';
 
-        const scriptFile = path.join(ASSETS_DIR, conventionalScriptPath);
-        const scriptsFullPath =
-            path.join(!converterConfig.useHooks ? publicB : srcB, scriptFile);
-        return Object.assign(
-            script, {...script, path: scriptsFullPath, shortPath: scriptFile});
-    });
+            const scriptFile = path.join(ASSETS_DIR, conventionalScriptPath);
+            const scriptsFullPath = path.join(
+                !converterConfig.useHooks ? publicB : srcB, scriptFile);
+            return Object.assign(
+                script,
+                {...script, path: scriptsFullPath, shortPath: scriptFile});
+        })
+        .filter(
+            script =>
+                !fs.existsSync(path.join(script.path, script.scriptName)));
+
     const useScripts = scripts.filter(script => script.isInline);
 
     if (isEmpty(useScripts) && !useHooks) {
@@ -320,8 +410,11 @@ async function addScripts(scripts, resourcePath) {
         }));
     }
 
-    await[emplaceInRoot, emplaceHooks].at(converterConfig.useHooks)(
-        scripts, resourcePath);
+    if (useHooks) {
+        await emplaceHooks(scripts, pagePath, resourcePath);
+    } else {
+        await emplaceInRoot(scripts, resourcePath);
+    }
 }
 
 async function emplaceInRoot(scripts, resourcePath) {
@@ -352,6 +445,64 @@ async function emplaceInRoot(scripts, resourcePath) {
     await removeHooks('*', resourcePath);
 }
 
+function deriveNameFrom(filePath) {
+    const {base, ext} = path.parse(filePath);
+    const name        = base.slice(0, -ext.length);
+    const page        = Array.from(name.matchAll(/([a-zA-Z]+)/g))
+                     .sort((one, other) => other.index - one.index)
+                     .reduce((acc, m) => acc + capitalize(m[1]), '')
+                     .concat('Page');
+    return page;
+}
+
+function capitalize(str) {
+    return str[0].toUpperCase() + str.slice(1).toLowerCase();
+}
+
+function strJoin() {
+    const delimiter = lastEntry(Array.from(arguments));
+    const strings   = Array.from(arguments).slice(0, -1);
+
+    const single = strings.reduce(
+        (acc, str, idx) => idx == 0 ? str :
+            isEmpty(acc)            ? str :
+                                      acc + delimiter + str,
+        '');
+
+    return single;
+}
+
+function setDifference(one, other, property) {
+    return one.filter(
+        oneItem => !other.find(
+            otherItem => otherItem[property] === oneItem[property]));
+}
+
+function uniquefy() {
+    const property    = lastEntry(Array.from(arguments));
+    const collections = Array.from(arguments).slice(0, -1);
+    const uniqueMap   = new Map();
+
+    const uniqueCollection =
+        collections.reduce((acc, collection) => acc.concat(collection), [])
+            .filter(
+                entry =>
+                    isDefined(entry[property]) && isNotEmpty(entry[property]))
+            .filter(entry => {
+                if (uniqueMap.get(entry[property]))
+                    return false;
+
+                uniqueMap.set(entry[property], true);
+                return true;
+            });
+
+    return uniqueCollection;
+}
+
+function pageIsInStream(stream, page) {
+    return stream.find(p => p.href === page.href);
+}
+
 function joinAttrs(attrs, extras /* nullable */) {
     assert(isDefined(attrs) && isObject(attrs));
 
@@ -363,21 +514,36 @@ function joinAttrs(attrs, extras /* nullable */) {
         .trim();
 }
 
-async function emplaceHooks(scripts, resourcePath) {
+async function duplicatePageTemplate(pagePath, resourcePath) {
+    const {pageB} = resourcePath;
+    assert(isDefined(pageB));
+
+    const refPageName     = 'page-base.jsx';
+    const refPageFullPath = path.join(pageB, refPageName);
+    const newPageFullPath = path.join(pageB, pagePath);
+
+    await fsp.copyFile(refPageFullPath, newPageFullPath);
+}
+
+async function emplaceHooks(scripts, pagePath, resourcePath) {
+    const {pageB, srcB} = resourcePath;
+    assert(isDefined(pageB));
+    assert(isDefined(srcB));
+
     const scriptsList = scripts.reduce(
         (acc, script) => acc + '\'' + script.scriptName + '\'' +
             ',\n\t',
         '\n\t');
+    const hooksPath   = path.join(srcB, 'hooks/useScript');
+    const relHookIncl = path.relative(pageB, srcB);
     const hook =
         `\n\tconst [loadedScripts, error] = useScript([${scriptsList}]);`;
-    const include = `\nimport useScript from './hooks/useScript';`;
+    const include = `\nimport useScript from '${relHookIncl}';`;
 
-    const {app, appB} = resourcePath;
-    assert(isDefined(app));
-    assert(isDefined(appB));
+    const pageFullPath = path.join(pageB, pagePath);
 
-    await emplaceImpl(HOOKS_TAG, appB, appB, hook);
-    await emplaceImpl(HOOKS_INC_TAG, appB, appB, include);
+    await emplaceImpl(HOOKS_TAG, pageFullPath, pageFullPath, hook);
+    await emplaceImpl(HOOKS_INC_TAG, pageFullPath, pageFullPath, include);
 }
 
 async function removeHooks(hooks, resourcePath) {
@@ -394,6 +560,7 @@ async function removeHooks(hooks, resourcePath) {
         });
     }
 }
+
 async function deleteFilesMatch(root, pattern) {
     assert(isRegExp(pattern));
 
@@ -564,7 +731,9 @@ function bt(dir) {
 
     return path.join(dir, '..');
 }
-
+/*
+ * Setup navigation for the pages.
+ */
 async function emplaceApp(pages, resourcePath) {
     const {appB} = resourcePath;
     assert(isArray(pages));
@@ -575,15 +744,14 @@ async function emplaceApp(pages, resourcePath) {
     let   routesIncl   = '';
     const isSinglePage = pages.length === 1;
     for (const page of pages) {
-        const {name, title, description} = page;
+        const {name, title, description} = page.info;
         const pageUrl = isSinglePage ? '' : name.toLowerCase();
-        allPageCases = allPageCases + `case '/${pageUrl}':\n
-                        title = '${title}';\n
-                        metaDescription = '${description}';\n
-                        break;\n`;
-        allRoutes = allRoutes + `<Route 
-                    path="/${pageUrl}" 
-                    element={<${name} />} />\n`;
+        allPageCases  = strJoin(
+             allPageCases, `case '/${pageUrl}':\n`, `\ttitle = '${title}';\n`,
+            `\tmetaDescription = '${description}';\n`, `\tbreak;\n`, '\t');
+        allRoutes = strJoin(
+            allRoutes, `<Route`, `path="/${pageUrl}"`,
+            `element={<${name} />} />\n\t\t`, ' ');
 
         routesIncl = routesIncl + `\nimport ${name} from './pages/${name}';`;
     }
@@ -593,20 +761,19 @@ async function emplaceApp(pages, resourcePath) {
     await emplaceImpl(ROUTES_INC_TAG, appB, appB, routesIncl.trimRight());
 }
 
-async function emplaceHTML(rawHTML, pageName, resourcePath) {
+async function emplaceHTML(rawHTML, pageInfo, resourcePath) {
     const {pageB} = resourcePath;
     assert(isDefined(pageB));
 
     const refPageName     = 'page-base.jsx';
-    const newPageName     = pageName + '.jsx';
     const refPageFullPath = path.join(pageB, refPageName);
-    const newPageFullPath = path.join(pageB, newPageName);
+    const newPageFullPath = path.join(pageB, pageInfo.path);
 
     await emplaceImpl(
         PAGE_TAG, refPageFullPath, newPageFullPath,
         useJSXStyleComments(rawHTML));
     await emplaceImpl(
-        PAGE_NAME_TAG, newPageFullPath, newPageFullPath, pageName);
+        PAGE_NAME_TAG, newPageFullPath, newPageFullPath, pageInfo.name);
 }
 
 function useJSXStyleComments(rawHTML) {
@@ -644,7 +811,9 @@ function clip(str, maxLen) {
 }
 
 async function updateLinksFromLinksContent(
-    doc, pageSourceFile, resourcePath, indexer, links) {
+    doc, pageSourceFile, resourcePath, links) {
+    assert(isString(pageSourceFile));
+
     const {publicB} = resourcePath;
     assert(isDefined(publicB));
 
@@ -653,21 +822,24 @@ async function updateLinksFromLinksContent(
             continue;
 
         const linkFullPath = path.join(publicB, link.href);
+        if (!fs.existsSync(linkFullPath))
+            continue;
+
         try {
-            let content        = (await fsp.readFile(linkFullPath)).toString();
-            [content, indexer] = await updateStyleLinks(
-                doc, pageSourceFile, resourcePath, indexer, content);
-            await fsp.writeFile(linkFullPath, content);
+            const content = (await fsp.readFile(linkFullPath)).toString();
+            const updatedContent = await updateStyleLinks(
+                doc, pageSourceFile, resourcePath, content);
+            await fsp.writeFile(linkFullPath, updatedContent);
 
         } catch (err) {
             console.error(err);
         };
     }
-    return [links, indexer];
+
+    return links;
 }
 
-async function updateStyleLinks(
-    doc, pageSourceFile, resourcePath, indexer, style) {
+async function updateStyleLinks(doc, pageSourceFile, resourcePath, style) {
     const fixables = Array.from(style.matchAll(/url\s*\(([^\)]+)\)/gm))
                          .sort((one, other) => other.index - one.index)
                          .filter(link => {
@@ -677,14 +849,14 @@ async function updateStyleLinks(
     logger.info('Fixables:', fixables);
 
     if (isEmpty(fixables)) {
-        return [style, indexer];
+        return style;
     }
 
     const links = fixables.map(
         (link, index) => ({value: unQuote(link[1]), recovery: index}));
 
-    const [resolvedAssetsPath, _] =
-        await retrieveAssetsFromGlobalDirectory(pageSourceFile, links, indexer);
+    const     resolvedAssetsPath =
+        await retrieveAssetsFromGlobalDirectory(pageSourceFile, links);
 
     await copyResolvedAssetsToOutputDirectory(
         resolvedAssetsPath, links, resourcePath);
@@ -701,7 +873,7 @@ async function updateStyleLinks(
             style.substring(recInfo.index + recInfo[0].length);
     }
 
-    return [style, indexer];
+    return style;
 }
 
 function unQuote(link) {
@@ -722,16 +894,8 @@ async function updateMissingLinks(doc, pageSourceFile, resourcePath) {
     if (isEmpty(modifiables))
         return;
 
-    const pathIgnore = await buildPathIgnore();
-
-    const assetDirLookup = buildAssetLookup();
-    const pathIgnoreRe   = new RegExp(pathIgnore ?? '$^');
-
-    const searchDepth = converterConfig.searchDepth;
-    const indexer = {saved: {}, re: pathIgnoreRe, depth: searchDepth, path: ''};
-    const [resolvedAssetsPath, newIndexer] =
-        await retrieveAssetsFromGlobalDirectory(
-            pageSourceFile, modifiables, indexer);
+    const     resolvedAssetsPath =
+        await retrieveAssetsFromGlobalDirectory(pageSourceFile, modifiables);
 
     await copyResolvedAssetsToOutputDirectory(
         resolvedAssetsPath, modifiables, resourcePath);
@@ -759,8 +923,6 @@ async function updateMissingLinks(doc, pageSourceFile, resourcePath) {
     logger.info(
         'ResolvedAssetsPath', resolvedAssetsPath, 'Modified-Modifiables',
         modifiables);
-
-    return newIndexer;
 }
 
 async function copyResolvedAssetsToOutputDirectory(
@@ -827,25 +989,18 @@ function removeBackLinks(dir) {
     return dir.replace(/(?:\.\.\/?)*/gm, '');
 }
 
-async function retrieveAssetsFromGlobalDirectory(
-    pageSourceFile, assetsList, indexer) {
-    // Preconditions
-    assert(Array.isArray(assetsList));
-    isRegExp(assert(indexer.re));
-    assert(isNumber(indexer.depth));
+async function retrieveAssetsFromGlobalDirectory(pageSourceFile, assetsList) {
+    const indexer = await getIndexer();
 
-    const dirIDX                = indexer.saved;
-    const excludePattern        = indexer.re;
-    const maxDepth              = indexer.depth;
-    const savedGlobalAssetsPath = indexer.path;
+    const requestedAssetsResolvedPath = {};
+    const [globalAssetsPath, directoryIDX] =
+        await resolveGlobalAssetsPath(pageSourceFile, indexer.re);
 
-    const requestedAssetsResolvedPath      = {};
-    const [globalAssetsPath, directoryIDX] = isEmpty(Object.keys(dirIDX)) ?
-        await resolveGlobalAssetsPath(pageSourceFile, excludePattern) :
-        [savedGlobalAssetsPath, dirIDX];
+    indexer.update({...indexer, path: globalAssetsPath});
 
-    if (isEmpty(Object.keys(directoryIDX)))
+    if (isEmpty(Object.keys(directoryIDX))) {
         return [requestedAssetsResolvedPath, directoryIDX];
+    }
 
     for (const assetBundle of assetsList) {
         const asset                                      = assetBundle.value;
@@ -905,21 +1060,13 @@ async function retrieveAssetsFromGlobalDirectory(
         isNotNull(requestedAssetsResolvedPath) &&
         isBehaved(requestedAssetsResolvedPath));
 
-    return [
-        requestedAssetsResolvedPath, {
-            saved: directoryIDX,
-            re: excludePattern,
-            depth: maxDepth,
-            path: globalAssetsPath
-        }
-    ];
+    return requestedAssetsResolvedPath;
 }
 
 function groupAssetsWithSimilarOrigin(providedAssets, origin) {
     return providedAssets.filter(
         asset => path.normalize(asset.dir).search(origin) !== -1);
 }
-
 
 async function resolveGlobalAssetsPath(pageSourceFile, excludePattern) {
     const {deduceAssetsPathFromBaseDirectory} = converterConfig;
@@ -954,12 +1101,15 @@ async function resolveGlobalAssetsPath(pageSourceFile, excludePattern) {
 }
 
 async function indexDirectory(globalAssetsPath, excludePattern, maxDepth) {
-    return await indexDirectoryImpl(globalAssetsPath, {}, 0);
+    if (indexDirectory[globalAssetsPath]) {
+        return indexDirectory[globalAssetsPath];
+    }
 
     async function indexDirectoryImpl(globalAssetsPath, aggregations, depth) {
         if (depth >= maxDepth)
             return aggregations;
 
+        const directoryQueue    = [];
         const directoryIterator = await fsp.readdir(globalAssetsPath);
         for (const file of directoryIterator) {
             const filePath    = path.join(globalAssetsPath, file);
@@ -970,7 +1120,7 @@ async function indexDirectory(globalAssetsPath, excludePattern, maxDepth) {
                 continue;
 
             if (isDirectory) {
-                await indexDirectoryImpl(filePath, aggregations, depth + 1);
+                directoryQueue.push({path: filePath, depth: depth + 1});
             } else {
                 const fileInfo           = parseFile(filePath);
                 const previousOccurrence = aggregations[fileInfo.base];
@@ -984,9 +1134,16 @@ async function indexDirectory(globalAssetsPath, excludePattern, maxDepth) {
                 });
             }
         }
+        for (const directory of directoryQueue) {
+            await indexDirectoryImpl(
+                directory.path, aggregations, directory.depth + 1);
+        }
 
         return aggregations;
     }
+
+    return indexDirectory[globalAssetsPath] =
+               await indexDirectoryImpl(globalAssetsPath, {}, 0);
 }
 
 
@@ -1009,24 +1166,26 @@ function buildExternalSource(doc, pageSourceFile, tags) {
                 const {attribute, element} = link;
                 const tag                  = attribute ?? link;
                 const isHTMLElement        = isBehaved(element);
+                // removeBacklink is needed to treat the files
+                // so as to sandbox the links.
                 if (tag.src) {
                     return {
                         source: 'src',
-                        value: tag.src,
+                        value: removeBackLinks(tag.src),
                         isHTMLElement: isHTMLElement,
                         element: isHTMLElement ? element : link
                     };
                 } else if (tag.href) {
                     return {
                         source: 'href',
-                        value: tag.href,
+                        value: removeBackLinks(tag.href),
                         isHTMLElement: isHTMLElement,
                         element: isHTMLElement ? element : link
                     };
                 } else if (tag.scriptName) {
                     return {
                         source: 'scriptName',
-                        value: tag.scriptName,
+                        value: removeBackLinks(tag.scriptName),
                         isHTMLElement: isHTMLElement,
                         element: isHTMLElement ? element : link
                     };
@@ -1034,7 +1193,14 @@ function buildExternalSource(doc, pageSourceFile, tags) {
             })
             .filter(
                 link => link && !isAbsoluteURI(link.value) &&
-                    !isSelfReference(pageSourceFile, link.value));
+                    !isSelfReference(pageSourceFile, link.value))
+            // don't extract links that point to other pages yet.
+            // This has to be given its own page from where it can be
+            // loaded.
+            .filter(
+                link =>
+                    !(link.isHTMLElement && link.element.nodeName === 'A' &&
+                      parseFile(link.value).extv2 === 'html'));
 
     return source;
 }
@@ -1203,7 +1369,7 @@ async function deleteDirectory(path) {
 function extractDescription(metas) {
     const selection = metas.find(meta => meta.name === 'description');
 
-    if (isEmpty(selection.content)) {
+    if (isNotDefined(selection) || isEmpty(selection.content)) {
         return metaTags.find(meta => meta.name === 'description').content;
     }
 
@@ -1219,8 +1385,8 @@ function extractTitle(doc, node) {
     return titleElement ? title : repl;
 }
 
-function extractLinks(doc) {
-    return extractPropsImpl(doc, 'head link');
+function extractLinks(doc, otherLinks) {
+    return (otherLinks ?? []).concat(extractPropsImpl(doc, 'head link'));
 }
 
 function extractMetas(doc) {
@@ -1231,24 +1397,72 @@ function extractPropsImpl(doc, selector) {
     const allProps = Array.from(doc.querySelectorAll(selector));
     if (isEmpty(allProps))
         return [];
-
     return allProps.map(prop => getAttributesRaw(prop));
 }
 
-function extractNextPageLinks(doc) {
+async function extractAllPageLinks(doc, pageSourceFile, resourcePath) {
     const links =
         Array.from(doc.querySelectorAll('a[href]'))
-            .map(element => getAttributesRaw(element).href)
-            .filter(href => !isEmpty(href) && !href.startsWith('#'))
-            .filter(href => !isAbsoluteURI(href) && !isSelfReference(href));
+            .map(element => ({
+                     element: element,
+                     href: path.normalize(getAttributesRaw(element).href)
+                 }))
+            .reduce(
+                (acc, link) => !acc.find(l => l.href == link.href) ?
+                    acc.concat([link]) :
+                    acc,
+                [])
+            .filter(link => isNotEmpty(link.href) && !link.href.startsWith('#'))
+            .filter(
+                link => !isAbsoluteURI(link.href) &&
+                    !isSelfReference(mainSourceFile, link.href))
+            .map(link => ({...link, ...parseFile(link.href)}))
+            .filter(link => link.extv2 === 'html');
 
-    if (isEmpty(links))
-        return links;
+    const tinyLinks =
+        links.map((link, index) => ({value: link.href, recovery: index}));
+
+    const     resolvedAssetsPath =
+        await retrieveAssetsFromGlobalDirectory(pageSourceFile, tinyLinks);
+
+    const {pageB} = resourcePath;
+    assert(isDefined(pageB));
+
+    for (const link of tinyLinks) {
+        const repl = resolvedAssetsPath[link.value];
+        if (isNotDefined(repl))
+            continue;
+
+        Object.assign(links[link.recovery], {
+            ...links[link.recovery],
+            res: {realpath: repl.realpath, dir: path.parse(link.value).dir}
+        });
+    }
 
     return links;
 }
 
-function extractStyles(doc, node) {
+async function getIndexer() {
+    if (getIndexer.indexer) {
+        return getIndexer.indexer;
+    }
+
+    const pathIgnore = await buildPathIgnore();
+
+    const assetDirLookup = buildAssetLookup();
+    const pathIgnoreRe   = new RegExp(pathIgnore ?? '$^');
+    const searchDepth    = converterConfig.searchDepth;
+
+    return getIndexer.indexer = {
+        saved: {},
+        re: pathIgnoreRe,
+        depth: searchDepth,
+        path: '',
+        update: (indexer) => getIndexer.indexer = indexer
+    };
+}
+
+function extractStyles(doc) {
     const allStyles = Array.from(doc.querySelectorAll('style'));
     if (isEmpty(allStyles))
         return '';
@@ -1503,6 +1717,10 @@ function isNotBehaved(any) {
 
 function isDefined(any) {
     return isBehaved(any) && isNotNull(any);
+}
+
+function isNotDefined(any) {
+    return !isDefined(any);
 }
 
 function isNull(any) {
