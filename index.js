@@ -97,7 +97,7 @@ modifyLock(BUILD_DIR, HOOKS_DIR, ASSETS_DIR);
 
 const converterConfig = {
     useHooks: false,
-    searchDepth: 4,
+    searchDepth: -1,
     deduceAssetsPathFromBaseDirectory: true,
     usePathRelativeIndex: true,
     archive: false
@@ -159,7 +159,6 @@ async function generateAllPages(landingPage) {
     const {useHooks} = converterConfig;
     assert(isDefined(useHooks));
 
-    // FIXME: Confirm the uniqueness property for pages (href).
     async function generateAllPagesImpl(pages, resourcePath) {
         let   pagesStream      = [].concat(pages);
         let   updatedLinks     = [];
@@ -175,13 +174,14 @@ async function generateAllPages(landingPage) {
 
                 qLookup[page.href] = true;
 
-                const pageLocation = page?.res?.realpath ?? page.href;
+                const pageLocationFile = page?.res?.realpath ?? page.href;
+                const pageLocation     = path.dirname(pageLocationFile);
 
                 logger.info(
-                    '\n\n', '='.repeat(50), pageLocation, '='.repeat(50),
+                    '\n\n', '='.repeat(50), pageLocationFile, '='.repeat(50),
                     '\n\n');
 
-                const content = await fsp.readFile(pageLocation);
+                const content = await fsp.readFile(pageLocationFile);
 
                 const dom  = new jsdom.JSDOM(content);
                 const doc  = dom.window.document;
@@ -193,12 +193,13 @@ async function generateAllPages(landingPage) {
                  * be loaded in a react sensitive context
                 \*/
 
-                const pageMetas        = extractMetas(doc);
-                const currentPageLinks = extractLinks(doc);
+                const pageMetas        = extractMetas(doc, pageLocation);
+                const currentPageLinks = extractLinks(doc, pageLocation);
                 const pageTitle        = extractTitle(doc, root);
 
                 const otherPages = setDifference(
-                    await extractAllPageLinks(doc, pageLocation, resourcePath),
+                    await extractAllPageLinks(
+                        doc, pageLocationFile, resourcePath),
                     pagesStream, 'href');
 
                 reconstructTree(root);
@@ -209,15 +210,16 @@ async function generateAllPages(landingPage) {
                 const pageStyles = extractStyles(doc);
 
                 await updateMissingLinks(
-                    doc, pageLocation, resourcePath, currentPageLinks, scripts);
+                    doc, pageLocationFile, resourcePath, currentPageLinks,
+                    scripts);
 
                 updatedLinks = await updateLinksFromLinksContent(
-                    doc, pageLocation, resourcePath, currentPageLinks);
+                    doc, pageLocationFile, resourcePath, currentPageLinks);
 
                 allLinks = uniquefy(allLinks, updatedLinks, 'href');
 
                 currentPageStyle = await updateStyleLinks(
-                    doc, pageLocation, resourcePath, pageStyles);
+                    doc, pageLocationFile, resourcePath, pageStyles);
 
                 allStyles = strJoin(allStyles, currentPageStyle, '\n');
 
@@ -229,13 +231,15 @@ async function generateAllPages(landingPage) {
 
                 const pageDescription = extractDescription(pageMetas);
                 const pageName        = deriveNameFrom(page.base);
-                const pageFile = (page?.res?.dir ?? '') + pageName + '.jsx';
+                const pageFile =
+                    path.join((page?.res?.dir ?? ''), pageName) + '.jsx';
                 const pageInfo = {
                     name: pageName,
                     title: pageTitle,
                     description: pageDescription,
                     path: pageFile
                 };
+
 
                 logger.info('PageInfo: ', pageInfo);
 
@@ -259,7 +263,7 @@ async function generateAllPages(landingPage) {
                 pagesStream = pagesStream.concat(otherPages);
 
                 logger.info(
-                    '\n\n', '='.repeat(50), pageLocation, '='.repeat(50),
+                    '\n\n', '='.repeat(50), pageLocationFile, '='.repeat(50),
                     '\n\n');
             }
         } catch (err) {
@@ -285,7 +289,6 @@ async function generateAllPages(landingPage) {
 
         !useHooks && await addScripts(allScripts, null, processingParams);
 
-        // FIXME: getAllpages for the app.
         await emplaceApp(allPages, processingParams);
 
         await fixupWebpack(processingParams);
@@ -522,6 +525,8 @@ async function duplicatePageTemplate(pagePath, resourcePath) {
     const refPageFullPath = path.join(pageB, refPageName);
     const newPageFullPath = path.join(pageB, pagePath);
 
+    await fsp.mkdir(path.dirname(newPageFullPath), {recursive: true});
+
     await fsp.copyFile(refPageFullPath, newPageFullPath);
 }
 
@@ -703,7 +708,7 @@ async function emplaceStyle(content, resourcePath) {
         return;
     }
 
-    const styleInclude = `\nimport './${path.basename(resourcePath.style)}';`;
+    const styleInclude = `\nimport '${path.basename(resourcePath.style)}';`;
     await emplaceImpl(STYLE_TAG, style, styleB, content);
     await emplaceImpl(STYLE_INC_TAG, appB, appB, styleInclude);
     await emplaceImpl(STYLE_INC_TAG, scriptB, scriptB, styleInclude);
@@ -735,7 +740,7 @@ function bt(dir) {
  * Setup navigation for the pages.
  */
 async function emplaceApp(pages, resourcePath) {
-    const {appB} = resourcePath;
+    const {appB, pageB} = resourcePath;
     assert(isArray(pages));
     assert(isString(appB));
 
@@ -753,7 +758,9 @@ async function emplaceApp(pages, resourcePath) {
             allRoutes, `<Route`, `path="/${pageUrl}"`,
             `element={<${name} />} />\n\t\t`, ' ');
 
-        routesIncl = routesIncl + `\nimport ${name} from './pages/${name}';`;
+        const pageIncl = path.join('pages', path.normalize(page.info.path));
+
+        routesIncl = routesIncl + `\nimport ${name} from '${pageIncl}';`;
     }
 
     await emplaceImpl(PAGE_INFO_TAG, appB, appB, allPageCases.trimRight());
@@ -852,8 +859,11 @@ async function updateStyleLinks(doc, pageSourceFile, resourcePath, style) {
         return style;
     }
 
-    const links = fixables.map(
-        (link, index) => ({value: unQuote(link[1]), recovery: index}));
+    const links = fixables.map((link, index) => ({
+                                   value: unQuote(link[1]),
+                                   rela: path.dirname(pageSourceFile),
+                                   recovery: index
+                               }));
 
     const     resolvedAssetsPath =
         await retrieveAssetsFromGlobalDirectory(pageSourceFile, links);
@@ -877,11 +887,15 @@ async function updateStyleLinks(doc, pageSourceFile, resourcePath, style) {
 }
 
 function unQuote(link) {
-    const q = ['"', '\'', '`'];
-    link    = link.trim();
-    return link.slice(
-        q.includes(link[0]) * 1,
-        [link.length, -1].at(q.includes(lastEntry(link))));
+    const q     = ['"', '\'', '`', '&quot;', '\\"', '\\\'', '\\`'];
+    link        = link.trim();
+    const begin = q.findIndex(b => link.slice(0, b.length) === b);
+    if (begin === -1)
+        return link;
+    const end = q.findLastIndex(b => link.slice(-b.length) === b);
+    if (end === -1)
+        return link;
+    return link.slice(q[begin].length, -q[end].length);
 }
 
 async function updateMissingLinks(doc, pageSourceFile, resourcePath) {
@@ -893,6 +907,7 @@ async function updateMissingLinks(doc, pageSourceFile, resourcePath) {
 
     if (isEmpty(modifiables))
         return;
+
 
     const     resolvedAssetsPath =
         await retrieveAssetsFromGlobalDirectory(pageSourceFile, modifiables);
@@ -961,7 +976,7 @@ function generateAssetsFinalDirectory(assetBundle) {
 
     const {usePathRelativeIndex} = converterConfig;
     const asset                  = parseFile(assetBundle.value);
-    const assetDir               = removeBackLinks(path.normalize(asset.dir));
+    const assetDir               = path.normalize(asset.dir);
 
     assert(isBoolean(usePathRelativeIndex));
 
@@ -999,18 +1014,22 @@ async function retrieveAssetsFromGlobalDirectory(pageSourceFile, assetsList) {
     indexer.update({...indexer, path: globalAssetsPath});
 
     if (isEmpty(Object.keys(directoryIDX))) {
-        return [requestedAssetsResolvedPath, directoryIDX];
+        return requestedAssetsResolvedPath;
     }
 
+    const continueKey = 'x';
     for (const assetBundle of assetsList) {
         const asset                                      = assetBundle.value;
-        const {realpath, version, ext, extv2, base, dir} = parseFile(asset);
+        const assetInfo                                  = parseFile(asset);
+        const {realpath, version, ext, extv2, base, dir} = assetInfo;
         const providedAsset                              = directoryIDX[base];
+
+        let fileNotFound = false;
 
         if (providedAsset) {
             if (Array.isArray(providedAsset)) {
-                const withSimilarOrigin = groupAssetsWithSimilarOrigin(
-                    providedAsset, path.normalize(dir));
+                const withSimilarOrigin = filterAssetsByRelativity(
+                    providedAsset, {...assetBundle, realpath: realpath});
                 if (withSimilarOrigin.length === 1) {
                     console.info(
                         '\nThe file found at', withSimilarOrigin[0].realpath,
@@ -1020,6 +1039,7 @@ async function retrieveAssetsFromGlobalDirectory(pageSourceFile, assetsList) {
                     console.info(
                         '\nThe following list of assets match',
                         '\nYour request for the file:', base,
+                        '\nof base path:', dir,
                         '\nEnter the number in front to choose',
                         '\nthe file: ');
                     let counter = 0;
@@ -1035,11 +1055,18 @@ async function retrieveAssetsFromGlobalDirectory(pageSourceFile, assetsList) {
                             'The file you requested requires version:',
                             version);
                     }
-                    const     reply =
-                        await sanitizedPrompt('Enter your selection: ');
-                    assert(Number.isFinite(+reply));
-                    requestedAssetsResolvedPath[asset] =
-                        providedAsset[(+reply + (+reply === 0)) - 1];
+                    const reply = await sanitizedPrompt(strJoin(
+                        'Enter your selection', '(`Enter` for default, `',
+                        continueKey, '` to leave: ', ''));
+                    assert(
+                        Number.isFinite(+reply) ||
+                        reply.toLowerCase() === continueKey);
+                    if (Number.isFinite(+reply)) {
+                        requestedAssetsResolvedPath[asset] =
+                            providedAsset[(+reply + (+reply === 0)) - 1];
+                    } else if (reply.toLowerCase() === continueKey) {
+                        fileNotFound = true;
+                    }
                 }
             } else {
                 console.info(
@@ -1049,7 +1076,11 @@ async function retrieveAssetsFromGlobalDirectory(pageSourceFile, assetsList) {
                     providedAsset.version ?? '');
                 requestedAssetsResolvedPath[asset] = providedAsset;
             }
-        } else if (!isSelfReference(pageSourceFile, base)) {
+        } else {
+            fileNotFound = true;
+        }
+
+        if (!isSelfReference(pageSourceFile, base) && fileNotFound) {
             console.info(
                 '\nCannot find asset by the name:', '`' + base + '`',
                 'its resolution is left to you');
@@ -1063,9 +1094,19 @@ async function retrieveAssetsFromGlobalDirectory(pageSourceFile, assetsList) {
     return requestedAssetsResolvedPath;
 }
 
-function groupAssetsWithSimilarOrigin(providedAssets, origin) {
-    return providedAssets.filter(
-        asset => path.normalize(asset.dir).search(origin) !== -1);
+function filterAssetsByRelativity(providedAssets, assetDetail) {
+    return providedAssets.filter(asset => {
+        const {rela, realpath} = assetDetail;
+        const isRelativeToRoot = realpath.startsWith('/');
+        const base             = isRelativeToRoot ? mainSourceDir : rela;
+        const shortpath        = removeRelativeHyperlinks(realpath);
+
+        return path.normalize(path.join(base, shortpath)) === asset.realpath;
+    });
+}
+
+function removeRelativeHyperlinks(link) {
+    return link.replace(/#[^\/]+\/?/g, '');
 }
 
 async function resolveGlobalAssetsPath(pageSourceFile, excludePattern) {
@@ -1092,7 +1133,7 @@ async function resolveGlobalAssetsPath(pageSourceFile, excludePattern) {
             return ['', requestedAssetsResolvedPath];
         }
     } else {
-        const providedPath = path.dirname(pageSourceFile);
+        const providedPath = mainSourceDir;
         return [
             providedPath,
             await indexDirectory(providedPath, excludePattern, {}, 0)
@@ -1136,14 +1177,19 @@ async function indexDirectory(globalAssetsPath, excludePattern, maxDepth) {
         }
         for (const directory of directoryQueue) {
             await indexDirectoryImpl(
-                directory.path, aggregations, directory.depth + 1);
+                directory.path, aggregations, directory.depth);
         }
 
         return aggregations;
     }
 
-    return indexDirectory[globalAssetsPath] =
-               await indexDirectoryImpl(globalAssetsPath, {}, 0);
+    indexDirectory[globalAssetsPath] =
+        await indexDirectoryImpl(globalAssetsPath, {}, 0);
+
+    logger.info('indexDirectory -- path:', globalAssetsPath);
+    logger.info('indexDirectory:', indexDirectory[globalAssetsPath]);
+
+    return indexDirectory[globalAssetsPath];
 }
 
 
@@ -1152,6 +1198,7 @@ function isSelfReference(reference, baseFile) {
 }
 
 function buildExternalSource(doc, pageSourceFile, tags) {
+    const relativeto = path.dirname(pageSourceFile);
     const source =
         tags.flat()
             // Remove generated scripts
@@ -1166,26 +1213,28 @@ function buildExternalSource(doc, pageSourceFile, tags) {
                 const {attribute, element} = link;
                 const tag                  = attribute ?? link;
                 const isHTMLElement        = isBehaved(element);
-                // removeBacklink is needed to treat the files
-                // so as to sandbox the links.
+
                 if (tag.src) {
                     return {
                         source: 'src',
-                        value: removeBackLinks(tag.src),
+                        value: tag.src,
+                        rela: relativeto,
                         isHTMLElement: isHTMLElement,
                         element: isHTMLElement ? element : link
                     };
                 } else if (tag.href) {
                     return {
                         source: 'href',
-                        value: removeBackLinks(tag.href),
+                        value: tag.href,
+                        rela: relativeto,
                         isHTMLElement: isHTMLElement,
                         element: isHTMLElement ? element : link
                     };
                 } else if (tag.scriptName) {
                     return {
                         source: 'scriptName',
-                        value: removeBackLinks(tag.scriptName),
+                        value: tag.scriptName,
+                        rela: relativeto,
                         isHTMLElement: isHTMLElement,
                         element: isHTMLElement ? element : link
                     };
@@ -1385,15 +1434,15 @@ function extractTitle(doc, node) {
     return titleElement ? title : repl;
 }
 
-function extractLinks(doc, otherLinks) {
-    return (otherLinks ?? []).concat(extractPropsImpl(doc, 'head link'));
+function extractLinks(doc, referencePath) {
+    return extractPropsImpl(doc, referencePath, 'head link');
 }
 
-function extractMetas(doc) {
-    return extractPropsImpl(doc, 'head meta');
+function extractMetas(doc, referencePath) {
+    return extractPropsImpl(doc, referencePath, 'head meta');
 }
 
-function extractPropsImpl(doc, selector) {
+function extractPropsImpl(doc, referencePath, selector) {
     const allProps = Array.from(doc.querySelectorAll(selector));
     if (isEmpty(allProps))
         return [];
@@ -1416,11 +1465,29 @@ async function extractAllPageLinks(doc, pageSourceFile, resourcePath) {
             .filter(
                 link => !isAbsoluteURI(link.href) &&
                     !isSelfReference(mainSourceFile, link.href))
-            .map(link => ({...link, ...parseFile(link.href)}))
+            // Match <a href='next/'></a>
+            .map(link => {
+                const isImplicit = lastEntry(link.href) === '/' ||
+                    isEmpty(path.parse(link.href).ext);
+                return isImplicit ? {
+                    ...link,
+                    href: removeRelativeHyperlinks(
+                        path.normalize(link.href + '/index.html'))
+                } :
+                                    link;
+            })
+            .map(link => ({
+                     ...link,
+                     rela: path.dirname(pageSourceFile),
+                     ...parseFile(link.href)
+                 }))
             .filter(link => link.extv2 === 'html');
 
-    const tinyLinks =
-        links.map((link, index) => ({value: link.href, recovery: index}));
+    const tinyLinks = links.map((link, index) => ({
+                                    value: link.href,
+                                    rela: path.dirname(pageSourceFile),
+                                    recovery: index
+                                }));
 
     const     resolvedAssetsPath =
         await retrieveAssetsFromGlobalDirectory(pageSourceFile, tinyLinks);
@@ -1428,6 +1495,7 @@ async function extractAllPageLinks(doc, pageSourceFile, resourcePath) {
     const {pageB} = resourcePath;
     assert(isDefined(pageB));
 
+    const resolvedLinks = [];
     for (const link of tinyLinks) {
         const repl = resolvedAssetsPath[link.value];
         if (isNotDefined(repl))
@@ -1437,9 +1505,11 @@ async function extractAllPageLinks(doc, pageSourceFile, resourcePath) {
             ...links[link.recovery],
             res: {realpath: repl.realpath, dir: path.parse(link.value).dir}
         });
+
+        resolvedLinks.push(links[link.recovery]);
     }
 
-    return links;
+    return resolvedLinks;
 }
 
 async function getIndexer() {
@@ -1737,8 +1807,14 @@ function isAbsoluteURI(link) {
 
 function isURI(link) {
     try {
-        new URL(link);
-        return true;
+        const idx = link.indexOf('://');
+        if (idx === -1) {
+            new URL(link);
+            return true;
+        } else {
+            const scheme = link.slice(0, idx);
+            return supportedSchemes.includes(scheme);
+        }
     } catch (error) {
         return false;
     }
@@ -1814,6 +1890,9 @@ function shiftByAttrs(page, off) {
             return off;
     } while (off < pageLen);
 }
+
+var supportedSchemes =
+    ['http', 'https', 'ftp', 'mailto', 'tel', 'data', 'file'];
 
 var supportedFonts = ['ttf', 'otf', 'woff', 'woff2', 'eot'];
 
