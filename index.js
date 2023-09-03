@@ -166,14 +166,24 @@ async function generateAllPages(landingPage) {
         const qLookup          = {};
         try {
             for (let i = 0; i < pagesStream.length; ++i) {
-                const page = pagesStream[i];
+                const page   = pagesStream[i];
+                const pageID = removeAbsoluteRef(mainSourceDir, page.href);
                 // Check if we have the page queued already.
-                if (qLookup[page.href]) {
+                if (qLookup[pageID]) {
                     continue;
                 }
 
-                qLookup[page.href] = true;
+                qLookup[pageID] = true;
 
+                /*\
+                 * The landing page has an href property.
+                 * The path to this property is expected
+                 * to be a valid path.
+                 * The other extracted pages already have
+                 * an href property hence, their resolved
+                 * realpath property is used as their real
+                 * location.
+                 \*/
                 const pageLocationFile = page?.res?.realpath ?? page.href;
                 const pageLocation     = path.dirname(pageLocationFile);
 
@@ -197,10 +207,10 @@ async function generateAllPages(landingPage) {
                 const currentPageLinks = extractLinks(doc, pageLocation);
                 const pageTitle        = extractTitle(doc, root);
 
-                const otherPages = setDifference(
+                const otherPages = uniquefyPages(
                     await extractAllPageLinks(
                         doc, pageLocationFile, resourcePath),
-                    pagesStream, 'href');
+                    pagesStream, mainSourceDir);
 
                 reconstructTree(root);
 
@@ -230,7 +240,7 @@ async function generateAllPages(landingPage) {
                 logger.info('All styles for page:', page.realpath, pageStyles);
 
                 const pageDescription = extractDescription(pageMetas);
-                const pageName        = deriveNameFrom(page.base);
+                const pageName        = deriveNameFrom(pageID);
                 const pageFile =
                     path.join((page?.res?.dir ?? ''), pageName) + '.jsx';
                 const pageInfo = {
@@ -239,7 +249,6 @@ async function generateAllPages(landingPage) {
                     description: pageDescription,
                     path: pageFile
                 };
-
 
                 logger.info('PageInfo: ', pageInfo);
 
@@ -279,7 +288,6 @@ async function generateAllPages(landingPage) {
 
         const     allPages =
             await generateAllPagesImpl([landingPage], processingParams);
-
 
         logger.info('allPages: ', allPages);
 
@@ -449,10 +457,9 @@ async function emplaceInRoot(scripts, resourcePath) {
 }
 
 function deriveNameFrom(filePath) {
-    const {base, ext} = path.parse(filePath);
-    const name        = base.slice(0, -ext.length);
-    const page        = Array.from(name.matchAll(/([a-zA-Z]+)/g))
-                     .sort((one, other) => other.index - one.index)
+    const {ext} = path.parse(filePath);
+    const name  = filePath.slice(0, -ext.length);
+    const page  = Array.from(name.matchAll(/([a-zA-Z]+)/g))
                      .reduce((acc, m) => acc + capitalize(m[1]), '')
                      .concat('Page');
     return page;
@@ -475,10 +482,14 @@ function strJoin() {
     return single;
 }
 
-function setDifference(one, other, property) {
-    return one.filter(
-        oneItem => !other.find(
-            otherItem => otherItem[property] === oneItem[property]));
+function uniquefyPages(newPages, allPages, mainDir) {
+    return newPages.filter(
+        oneItem => !allPages.find(
+            otherItem =>
+                removeAbsoluteRef(
+                    mainDir, otherItem?.res?.realpath ?? otherItem.href) ===
+                removeAbsoluteRef(
+                    mainDir, oneItem?.res?.realpath ?? oneItem.href)));
 }
 
 function uniquefy() {
@@ -500,6 +511,14 @@ function uniquefy() {
             });
 
     return uniqueCollection;
+}
+
+function removeAbsoluteRef(mainDir, href) {
+    const {dir} = path.parse(href);
+
+    const fullPath = isEmpty(dir) ? path.join(mainDir, href) : href;
+
+    return removeBackLinks(path.relative(mainDir, fullPath));
 }
 
 function pageIsInStream(stream, page) {
@@ -750,15 +769,18 @@ async function emplaceApp(pages, resourcePath) {
     const isSinglePage = pages.length === 1;
     for (const page of pages) {
         const {name, title, description} = page.info;
-        const pageUrl = isSinglePage ? '' : name.toLowerCase();
-        allPageCases  = strJoin(
-             allPageCases, `case '/${pageUrl}':\n`, `\ttitle = '${title}';\n`,
+        const realname =
+            page.info.path.slice(0, -path.extname(page.info.path).length);
+        const pageUrl =
+            isSinglePage ? '/' : path.normalize('/' + realname.toLowerCase());
+        allPageCases = strJoin(
+            allPageCases, `case '${pageUrl}':\n`, `\ttitle = '${title}';\n`,
             `\tmetaDescription = '${description}';\n`, `\tbreak;\n`, '\t');
         allRoutes = strJoin(
-            allRoutes, `<Route`, `path="/${pageUrl}"`,
+            allRoutes, `<Route`, `path="${pageUrl}"`,
             `element={<${name} />} />\n\t\t`, ' ');
 
-        const pageIncl = path.join('pages', path.normalize(page.info.path));
+        const pageIncl = path.join('pages', realname);
 
         routesIncl = routesIncl + `\nimport ${name} from '${pageIncl}';`;
     }
