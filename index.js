@@ -998,7 +998,7 @@ function generateAssetsFinalDirectory(assetBundle) {
 
     const {usePathRelativeIndex} = converterConfig;
     const asset                  = parseFile(assetBundle.value);
-    const assetDir               = path.normalize(asset.dir);
+    const assetDir               = removeBackLinks(path.normalize(asset.dir));
 
     assert(isBoolean(usePathRelativeIndex));
 
