@@ -1047,48 +1047,20 @@ async function retrieveAssetsFromGlobalDirectory(pageSourceFile, assetsList) {
         const providedAsset                              = directoryIDX[base];
 
         let fileNotFound = false;
-
         if (providedAsset) {
             if (Array.isArray(providedAsset)) {
                 const withSimilarOrigin = filterAssetsByRelativity(
                     providedAsset, {...assetBundle, realpath: realpath});
                 if (withSimilarOrigin.length === 1) {
+                    const selected = withSimilarOrigin[0];
                     console.info(
-                        '\nThe file found at', withSimilarOrigin[0].realpath,
-                        '\nhas been selected as a match for the file:', base);
+                        '\nThe file found at', selected.realpath,
+                        '\nhas been selected as a match for the file:', base,
+                        isNotNull(selected.version) ? ', with version:' : '',
+                        selected.version ?? '');
                     requestedAssetsResolvedPath[asset] = withSimilarOrigin[0];
                 } else {
-                    console.info(
-                        '\nThe following list of assets match',
-                        '\nYour request for the file:', base,
-                        '\nof base path:', dir,
-                        '\nEnter the number in front to choose',
-                        '\nthe file: ');
-                    let counter = 0;
-                    for (const file of providedAsset) {
-                        console.info(
-                            ++counter + '.', 'Path: ', file.realpath,
-                            (isNotNull(file.version) ?
-                                 '\nVersion: ' + file.version :
-                                 ''));
-                    }
-                    if (isNotNull(version)) {
-                        console.info(
-                            'The file you requested requires version:',
-                            version);
-                    }
-                    const reply = await sanitizedPrompt(strJoin(
-                        'Enter your selection', '(`Enter` for default, `',
-                        continueKey, '` to leave: ', ''));
-                    assert(
-                        Number.isFinite(+reply) ||
-                        reply.toLowerCase() === continueKey);
-                    if (Number.isFinite(+reply)) {
-                        requestedAssetsResolvedPath[asset] =
-                            providedAsset[(+reply + (+reply === 0)) - 1];
-                    } else if (reply.toLowerCase() === continueKey) {
-                        fileNotFound = true;
-                    }
+                    fileNotFound = true;
                 }
             } else {
                 console.info(
