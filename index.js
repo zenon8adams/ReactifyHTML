@@ -562,7 +562,7 @@ async function emplaceHooks(scripts, pagePath, resourcePath) {
     const relHookIncl = path.relative(pageB, srcB);
     const hook =
         `\n\tconst [loadedScripts, error] = useScript([${scriptsList}]);`;
-    const include = `\nimport useScript from '${relHookIncl}';`;
+    const include = `\nimport useScript from './${relHookIncl}';`;
 
     const pageFullPath = path.join(pageB, pagePath);
 
@@ -727,7 +727,7 @@ async function emplaceStyle(content, resourcePath) {
         return;
     }
 
-    const styleInclude = `\nimport '${path.basename(resourcePath.style)}';`;
+    const styleInclude = `\nimport './${path.basename(resourcePath.style)}';`;
     await emplaceImpl(STYLE_TAG, style, styleB, content);
     await emplaceImpl(STYLE_INC_TAG, appB, appB, styleInclude);
     await emplaceImpl(STYLE_INC_TAG, scriptB, scriptB, styleInclude);
@@ -763,16 +763,16 @@ async function emplaceApp(pages, resourcePath) {
     assert(isArray(pages));
     assert(isString(appB));
 
-    let   allPageCases = '';
-    let   allRoutes    = '';
-    let   routesIncl   = '';
-    const isSinglePage = pages.length === 1;
+    let allPageCases = '';
+    let allRoutes    = '';
+    let routesIncl   = '';
+    let pageCount    = 0;
     for (const page of pages) {
         const {name, title, description} = page.info;
         const realname =
             page.info.path.slice(0, -path.extname(page.info.path).length);
         const pageUrl =
-            isSinglePage ? '/' : path.normalize('/' + realname.toLowerCase());
+            pageCount == 0 ? '/' : path.normalize('/' + realname.toLowerCase());
         allPageCases = strJoin(
             allPageCases, `case '${pageUrl}':\n`, `\ttitle = '${title}';\n`,
             `\tmetaDescription = '${description}';\n`, `\tbreak;\n`, '\t');
@@ -782,7 +782,9 @@ async function emplaceApp(pages, resourcePath) {
 
         const pageIncl = path.join('pages', realname);
 
-        routesIncl = routesIncl + `\nimport ${name} from '${pageIncl}';`;
+        routesIncl = routesIncl + `\nimport ${name} from './${pageIncl}';`;
+
+        ++pageCount;
     }
 
     await emplaceImpl(PAGE_INFO_TAG, appB, appB, allPageCases.trimRight());
@@ -905,7 +907,7 @@ async function updateStyleLinks(doc, pageSourceFile, resourcePath, style) {
             style.substring(recInfo.index + recInfo[0].length);
     }
 
-    return style;
+    return style.trim();
 }
 
 function unQuote(link) {
@@ -1541,7 +1543,22 @@ function extractStyles(doc) {
 }
 
 function escapeAllJSXQuotes(text) {
-    return text.replace(/(>[^\{<>]*?)\{(.+)\}/gm, `$1{'{$2}'}`);
+    const matches =
+        Array.from(text.matchAll(/>((?:[^<>]*?(?:\{|\})[^<>]*?)+)</gm))
+            .sort((one, other) => other.index - one.index);
+
+    for (const match of matches) {
+        const start = match.index + 1;                    // includes `>`
+        const end   = match.index + match[0].length - 1;  // includes `<`
+        const repl  = match[1].replace(/(\{|\})/g, `{'$1'}`);
+
+        assert(text[start - 1] === '>');
+        assert(text[end] === '<');
+
+        text = text.substring(0, start) + repl + text.substring(end);
+    }
+
+    return text;
 }
 
 function extractAllScripts(doc) {
@@ -1828,10 +1845,9 @@ function closeSelfClosingTags(html) {
         // Sort the matches so that the replacement will
         // not have to bother about shifting every other
         // match after replacement of one.
-        const matches = Array.from(html.matchAll(regex)).sort((one, other) => {
-            return other.index - one.index;
-        });
-        html          = expandMatches(tag, html, matches);
+        const matches = Array.from(html.matchAll(regex))
+                            .sort((one, other) => other.index - one.index);
+        html = expandMatches(tag, html, matches);
     }
 
     return html;
