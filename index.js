@@ -48,14 +48,15 @@ const REPL_ID = 'hTmL';
 
 modifyLock(REPL_ID);
 
-const STYLE_TAG  = 'STYLE_CONTENT';
-const APP_TAG    = 'APP_CONTENT';
-const HOOKS_TAG  = 'HOOKS_CONTENT';
-const TITLE_TAG  = 'TITLE_CONTENT';
-const META_TAG   = 'META_CONTENT';
-const LINK_TAG   = 'LINK_CONTENT';
-const PAGE_TAG   = 'PAGE_CONTENT';
-const ROUTES_TAG = 'ROUTES_CONTENT';
+const STYLE_TAG        = 'STYLE_CONTENT';
+const APP_TAG          = 'APP_CONTENT';
+const HOOKS_TAG        = 'HOOKS_CONTENT';
+const TITLE_TAG        = 'TITLE_CONTENT';
+const META_TAG         = 'META_CONTENT';
+const LINK_TAG         = 'LINK_CONTENT';
+const PAGE_TAG         = 'PAGE_CONTENT';
+const ROUTES_TAG       = 'ROUTES_CONTENT';
+const REACT_IMPORT_TAG = 'REACT_IMPORT';
 
 modifyLock(
     REPL_ID, STYLE_TAG, APP_TAG, HOOKS_TAG, TITLE_TAG, META_TAG, LINK_TAG,
@@ -65,6 +66,7 @@ const STYLE_INC_TAG  = 'STYLE_INCLUDE';
 const HOOKS_INC_TAG  = 'HOOKS_INCLUDE';
 const SCRIPT_INC_TAG = 'SCRIPT_INCLUDE';
 const ROUTES_INC_TAG = 'ROUTES_INCLUDE';
+const USE_IMPORT_TAG = 'USE_IMPORT';
 
 modifyLock(STYLE_INC_TAG, HOOKS_INC_TAG, SCRIPT_INC_TAG, ROUTES_INC_TAG);
 
@@ -151,7 +153,12 @@ modifyLock(mainSourceFile, mainSourceDir);
 /*
  * Program starting point.
  */
-generateAllPages({href: mainSourceFile, ...parseFile(mainSourceFile), dir: ''});
+generateAllPages({
+    href: mainSourceFile,
+    isLanding: true,
+    ...parseFile(mainSourceFile),
+    dir: ''
+});
 
 async function generateAllPages(landingPage) {
     let allPageMetas = [], allStyles = '', allLinks = [], allScripts = [];
@@ -233,9 +240,6 @@ async function generateAllPages(landingPage) {
 
                 allStyles = strJoin(allStyles, currentPageStyle, '\n');
 
-                const rawHTML = closeSelfClosingTags(
-                    refitTags(dom.window.document.body.innerHTML));
-
                 logger.info('All scripts for page:', page.realpath, scripts);
                 logger.info('All styles for page:', page.realpath, pageStyles);
 
@@ -259,10 +263,16 @@ async function generateAllPages(landingPage) {
                     await emplaceTitle(pageTitle, resourcePath);
                 }
 
-                await             emplaceHTML(rawHTML, pageInfo, resourcePath);
                 useHooks && await addScripts(scripts, pageFile, resourcePath);
 
-                Object.assign(page, {...page, info: pageInfo});
+                // We have to delay the write of the transformed
+                // html because we need to resolve all pages that
+                // exists so as to replace their hrefs with an
+                // onClick handler.
+                const rawHTML = closeSelfClosingTags(
+                    refitTags(dom.window.document.body.innerHTML));
+
+                Object.assign(page, {...page, html: rawHTML, info: pageInfo});
                 allScripts   = useHooks ?
                       allScripts :
                       uniquefy(allScripts, scripts, 'scriptName');
@@ -298,6 +308,10 @@ async function generateAllPages(landingPage) {
         !useHooks && await addScripts(allScripts, null, processingParams);
 
         await emplaceApp(allPages, processingParams);
+
+        await relinkPages(allPages, processingParams);
+
+        await emplaceHTML(allPages, processingParams);
 
         await fixupWebpack(processingParams);
 
@@ -351,6 +365,8 @@ async function removeUnusedTags(pages, resourcePath) {
         await emplaceImpl(STYLE_INC_TAG, pageFullPath, pageFullPath, '');
         await emplaceImpl(HOOKS_TAG, pageFullPath, pageFullPath, '');
         await emplaceImpl(HOOKS_INC_TAG, pageFullPath, pageFullPath, '');
+        await emplaceImpl(REACT_IMPORT_TAG, pageFullPath, pageFullPath, '');
+        await emplaceImpl(USE_IMPORT_TAG, pageFullPath, pageFullPath, '');
     }
 
     await emplaceImpl(SCRIPT_INC_TAG, rootB, rootB, '');
@@ -363,7 +379,6 @@ async function removeUnusedTags(pages, resourcePath) {
         buildPathTemplateFrom(path.join(publicBaseName, favicon.href));
 
     await emplaceImpl(FAVICON_DIR_TAG, webpackB, webpackB, faviconTemplate);
-
 
     const indexer        = await getIndexer();
     const assetIsPresent = isNotEmpty(Object.keys(indexer.saved));
@@ -755,6 +770,77 @@ function bt(dir) {
 
     return path.join(dir, '..');
 }
+
+async function relinkPages(pages, resourcePath) {
+    const {pageB} = resourcePath;
+    assert(isDefined(pageB));
+
+    // create a lookup of all page and its corresponding
+    // route.
+    const routeMap = new Map();
+    pages.forEach(
+        page => routeMap.set(
+            page.isImplicit ? page.dir : page.realpath, page.route));
+
+    const re = new RegExp(
+        '<a[^]+?href[^=]*=[^`\'"]*((?:"[^"\\\\]*' +
+            '(?:\\\\.[^"\\\\]*)*"|\'[^\'\\\\]*(?:\\\\.' +
+            '[^\'\\\\]*)*\'|`[^`\\\\]*(?:\\\\.[^`\\\\]*)*`))',
+        'gm');
+    for (const page of pages) {
+        const {html} = page;
+        assert(html);
+
+        const allLinks = Array.from(html.matchAll(re))
+                             .sort((one, other) => other.index - one.index)
+                             .map(m => {
+                                 m[1] = path.normalize(
+                                     removeRelativeHyperlinks(unQuote(m[1])));
+                                 return m;
+                             })
+                             .filter(m => routeMap.get(m[1]));
+
+        if (isEmpty(allLinks))
+            continue;
+
+        Object.assign(
+            page,
+            {...page, html: fixAnchorRoutes(html, page, allLinks, routeMap)});
+
+        const pageFullPath = path.join(pageB, page.info.path);
+        const importDecl   = strJoin(
+              `import { Navigate, useNavigate } from "react-router-dom";`,
+              `@{${REACT_IMPORT_TAG}}`, '\n');
+        const navDecl = `\nconst navigate = useNavigate();`;
+        const navFun  = strJoin(
+             `const navigateTo = (event, page) => {`, `event.preventDefault();`,
+             `navigate(page);`, `}`, '\t\n');
+        const useImportDecl =
+            strJoin(navDecl, navFun, `@{${USE_IMPORT_TAG}}`, '\n');
+
+        await emplaceImpl(
+            REACT_IMPORT_TAG, pageFullPath, pageFullPath, importDecl);
+        await emplaceImpl(
+            USE_IMPORT_TAG, pageFullPath, pageFullPath, useImportDecl);
+    }
+}
+
+function fixAnchorRoutes(html, page, matches, routeMap) {
+    const hKey = 'href=';
+    for (const match of matches) {
+        const ihref = html.slice(match.index).indexOf(hKey);
+        const start = match.index + ihref + hKey.length;
+        const end   = match.index + match[0].length;
+        const route = routeMap.get(match[1]);
+        const repl =
+            `"javascript:void(0);" onClick={(e) => navigateTo(e, '${route}')}`;
+
+        html = html.substring(0, start) + repl + html.substring(end);
+    }
+
+    return html;
+}
+
 /*
  * Setup navigation for the pages.
  */
@@ -766,15 +852,11 @@ async function emplaceApp(pages, resourcePath) {
     let allPageCases = '';
     let allRoutes    = '';
     let routesIncl   = '';
-    let pageCount    = 0;
     for (const page of pages) {
         const {name, title, description} = page.info;
-        const realname =
-            page.info.path.slice(0, -path.extname(page.info.path).length);
-        const pageUrl =
-            pageCount == 0 ? '/' : path.normalize('/' + realname.toLowerCase());
-        allPageCases = strJoin(
-            allPageCases, `case '${pageUrl}':\n`, `\ttitle = '${title}';\n`,
+        const [pageUrl, realname]        = getPageRoute(page);
+        allPageCases                     = strJoin(
+                                allPageCases, `case '${pageUrl}':\n`, `\ttitle = '${title}';\n`,
             `\tmetaDescription = '${description}';\n`, `\tbreak;\n`, '\t');
         allRoutes = strJoin(
             allRoutes, `<Route`, `path="${pageUrl}"`,
@@ -784,7 +866,7 @@ async function emplaceApp(pages, resourcePath) {
 
         routesIncl = routesIncl + `\nimport ${name} from './${pageIncl}';`;
 
-        ++pageCount;
+        Object.assign(page, {...page, route: pageUrl});
     }
 
     await emplaceImpl(PAGE_INFO_TAG, appB, appB, allPageCases.trimRight());
@@ -792,19 +874,27 @@ async function emplaceApp(pages, resourcePath) {
     await emplaceImpl(ROUTES_INC_TAG, appB, appB, routesIncl.trimRight());
 }
 
-async function emplaceHTML(rawHTML, pageInfo, resourcePath) {
+function getPageRoute(page) {
+    const realname =
+        page.info.path.slice(0, -path.extname(page.info.path).length);
+    const pageUrl =
+        page.isLanding ? '/' : path.normalize('/' + realname.toLowerCase());
+
+    return [pageUrl, realname];
+}
+
+async function emplaceHTML(pages, resourcePath) {
     const {pageB} = resourcePath;
     assert(isDefined(pageB));
 
-    const refPageName     = 'page-base.jsx';
-    const refPageFullPath = path.join(pageB, refPageName);
-    const newPageFullPath = path.join(pageB, pageInfo.path);
+    for (const page of pages) {
+        const {info, html} = page;
+        const pageFullPath = path.join(pageB, info.path);
 
-    await emplaceImpl(
-        PAGE_TAG, refPageFullPath, newPageFullPath,
-        useJSXStyleComments(rawHTML));
-    await emplaceImpl(
-        PAGE_NAME_TAG, newPageFullPath, newPageFullPath, pageInfo.name);
+        await emplaceImpl(
+            PAGE_TAG, pageFullPath, pageFullPath, useJSXStyleComments(html));
+        await emplaceImpl(PAGE_NAME_TAG, pageFullPath, pageFullPath, info.name);
+    }
 }
 
 function useJSXStyleComments(rawHTML) {
@@ -863,7 +953,7 @@ async function updateLinksFromLinksContent(
             await fsp.writeFile(linkFullPath, updatedContent);
 
         } catch (err) {
-            console.error(err);
+            logger.error(err);
         };
     }
 
@@ -1035,13 +1125,13 @@ async function retrieveAssetsFromGlobalDirectory(pageSourceFile, assetsList) {
     const [globalAssetsPath, directoryIDX] =
         await resolveGlobalAssetsPath(pageSourceFile, indexer.re);
 
-    indexer.update({...indexer, path: globalAssetsPath});
+    indexer.update(
+        {...indexer, saved: globalAssetsPath, path: globalAssetsPath});
 
     if (isEmpty(Object.keys(directoryIDX))) {
         return requestedAssetsResolvedPath;
     }
 
-    const continueKey = 'x';
     for (const assetBundle of assetsList) {
         const asset                                      = assetBundle.value;
         const assetInfo                                  = parseFile(asset);
@@ -1125,7 +1215,7 @@ async function resolveGlobalAssetsPath(pageSourceFile, excludePattern) {
             } else
                 throw 'Error: Invalid path provided';
         } catch (err) {
-            console.error(err);
+            logger.error(err);
             return ['', requestedAssetsResolvedPath];
         }
     } else {
@@ -1448,10 +1538,9 @@ function extractPropsImpl(doc, referencePath, selector) {
 async function extractAllPageLinks(doc, pageSourceFile, resourcePath) {
     const links =
         Array.from(doc.querySelectorAll('a[href]'))
-            .map(element => ({
-                     element: element,
-                     href: path.normalize(getAttributesRaw(element).href)
-                 }))
+            .map(
+                element =>
+                    ({href: path.normalize(getAttributesRaw(element).href)}))
             .reduce(
                 (acc, link) => !acc.find(l => l.href == link.href) ?
                     acc.concat([link]) :
@@ -1463,10 +1552,15 @@ async function extractAllPageLinks(doc, pageSourceFile, resourcePath) {
                     !isSelfReference(mainSourceFile, link.href))
             // Match <a href='next/'></a>
             .map(link => {
+                // Implicit references such as: /docs/api
+                // refers to the index.html file found
+                // in that directory relative to the root
+                // i.e /docs/api/index.html
                 const isImplicit = lastEntry(link.href) === '/' ||
                     isEmpty(path.parse(link.href).ext);
                 return isImplicit ? {
                     ...link,
+                    isImplicit: true,
                     href: removeRelativeHyperlinks(
                         path.normalize(link.href + '/index.html'))
                 } :
