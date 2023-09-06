@@ -247,7 +247,6 @@ async function generateAllPages(landingPage) {
                 const rawHTML = closeSelfClosingTags(
                     refitTags(dom.window.document.body.innerHTML));
 
-
                 logger.info('All scripts for page:', page.realpath, scripts);
                 logger.info('All styles for page:', page.realpath, pageStyles);
 
@@ -256,6 +255,7 @@ async function generateAllPages(landingPage) {
                 const pageFile =
                     path.join((page?.res?.dir ?? ''), pageName) + '.jsx';
                 const pageInfo = {
+                    pageID: pageID,
                     name: pageName,
                     title: pageTitle,
                     description: pageDescription,
@@ -700,15 +700,24 @@ async function updateFaviconAddress(newFavicon, oldFavicon, resourcePath) {
     assert(isDefined(publicB));
     assert(isDefined(webpackB));
 
+    if (path.extname(oldFavicon.href) !== path.extname(newFavicon.href)) {
+        const oldExt = path.extname(oldFavicon.href);
+        const newExt = path.extname(newFavicon.href);
+        Object.assign(newFavicon, {
+            ...newFavicon,
+            href: newFavicon.href.slice(0, -newExt.length).concat(oldExt)
+        });
+    }
+
     const oldFaviconFile = path.join(publicB, oldFavicon.href);
     const newFaviconFile = path.join(publicB, newFavicon.href);
-
     try {
-        if (fs.existsSync(newFaviconFile)) {
-            assert(fs.existsSync(oldFaviconFile));
-            await removePath(oldFaviconFile);
+        if (fs.existsSync(oldFaviconFile)) {
+            await fsp.copyFile(oldFaviconFile, newFaviconFile);
+            const publicBaseName = path.basename(publicB);
 
-            const newFaviconTemplate = buildPathTemplateFrom(newFavicon.href);
+            const newFaviconTemplate = buildPathTemplateFrom(
+                path.join(publicBaseName, newFavicon.href));
             await emplaceImpl(
                 FAVICON_DIR_TAG, webpackB, webpackB, newFaviconTemplate);
         }
@@ -782,7 +791,10 @@ async function relinkPages(pages, resourcePath) {
     const routeMap = new Map();
     pages.forEach(
         page => routeMap.set(
-            page.isImplicit ? page.dir : page.realpath, page.route));
+            page.isLanding      ? page.info.pageID :
+                page.isImplicit ? page.dir :
+                                  page.realpath,
+            page.route));
 
     const re = new RegExp(
         '<a[^]+?href[^=]*=[^`\'"]*((?:"[^"\\\\]*' +
@@ -995,7 +1007,7 @@ async function updateStyleLinks(doc, pageSourceFile, resourcePath, style) {
         const assetsRealPath = path.join(ASSETS_DIR, finalDir);
         const assetFile = path.join(assetsRealPath, path.basename(link.value));
         const recInfo   = fixables[link.recovery];
-        style = style.substring(0, recInfo.index) + `url("${assetFile}")` +
+        style = style.substring(0, recInfo.index) + `url("/${assetFile}")` +
             style.substring(recInfo.index + recInfo[0].length);
     }
 
@@ -1640,17 +1652,14 @@ function extractStyles(doc) {
 
 function escapeAllJSXQuotes(text) {
     let   escapedText = '';
-    let   idx = 0, start = idx;
-    const comments = [
+    let   idx         = 0;
+    const comments    = [
         extractComments(text, '/*', '*/'), extractComments(text, '<!--', '-->')
     ].flat();
 
     while (idx !== -1) {
-        start = nextOf(idx, text, '>');
-        if (start === -1)
-            break;
-        const end = nextOf(start, text, '<');
-        if (end === -1)
+        const [start, end] = matchClosely(idx, text, '>', '<');
+        if (start === -1 || end === -1)
             break;
 
         if (isInComment(text, start, end, comments)) {
@@ -1683,6 +1692,31 @@ function nextOf(from, haystack, needle) {
 function isInComment(text, start, end, comments) {
     return comments.find(
         comment => start >= comment.start && end <= comment.end);
+}
+
+function matchClosely(pos, context, sDelim, eDelim) {
+    let spos = -1, epos = -1;
+    do {
+        const start = nextOf(pos, context, sDelim);
+        if (start === -1)
+            break;
+        const end = nextOf(start, context, eDelim);
+        if (end === -1)
+            break;
+        const nextsDelim = nextOf(start + 1, context, sDelim);
+        if (nextsDelim === -1) {
+            spos = start;
+            epos = end;
+            break;
+        } else if (nextsDelim < end) {
+            spos = pos = start;
+            epos       = end;
+        } else {
+            break;
+        }
+    } while (true);
+
+    return [spos, epos];
 }
 
 function extractComments(context, sDelim, eDelim) {
@@ -1809,7 +1843,6 @@ function modifyAttributes(node, attributes) {
          * e.g data-json={"key": "value"} is replaced this:
          *  data-json='"key": "value"'.
         \*/
-
         modifyEscapeIntent(node, provided, attributes);
         if ((ns = isNamespaced(attr))) {
             const modTag    = ns[1] + ns[2][0].toUpperCase() + ns[2].slice(1);
@@ -1891,14 +1924,19 @@ function formatStyle(value) {
     const allStyles =
         stylist
             .map(style => {
-                const div   = style.indexOf(':');
-                const one   = style.slice(0, div);
-                const other = style.slice(div + 1);
+                const div           = style.indexOf(':');
+                const one           = style.slice(0, div).trim();
+                const other         = style.slice(div + 1).trim();
+                const isUserDefined = one.startsWith('--');
                 if (isEmpty(one) || isEmpty(other))
                     return '';
                 const oneMatches = Array.from(one.matchAll(/-([a-z])/gm));
-                if (isEmpty(oneMatches))
+                if (isEmpty(oneMatches) || isUserDefined) {
+                    if (isUserDefined)
+                        return `'${one}': \`${other}\``;
                     return `${one}: \`${other}\``;
+                }
+
 
                 const jointOne = oneMatches.reduce((acc, m, i) => {
                     const section = m.input.substring(acc.start, m.index) +
