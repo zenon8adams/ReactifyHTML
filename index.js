@@ -240,6 +240,14 @@ async function generateAllPages(landingPage) {
 
                 allStyles = strJoin(allStyles, currentPageStyle, '\n');
 
+                // We have to delay the write of the transformed
+                // html because we need to resolve all pages that
+                // exists so as to replace their hrefs with an
+                // onClick handler.
+                const rawHTML = closeSelfClosingTags(
+                    refitTags(dom.window.document.body.innerHTML));
+
+
                 logger.info('All scripts for page:', page.realpath, scripts);
                 logger.info('All styles for page:', page.realpath, pageStyles);
 
@@ -264,13 +272,6 @@ async function generateAllPages(landingPage) {
                 }
 
                 useHooks && await addScripts(scripts, pageFile, resourcePath);
-
-                // We have to delay the write of the transformed
-                // html because we need to resolve all pages that
-                // exists so as to replace their hrefs with an
-                // onClick handler.
-                const rawHTML = closeSelfClosingTags(
-                    refitTags(dom.window.document.body.innerHTML));
 
                 Object.assign(page, {...page, html: rawHTML, info: pageInfo});
                 allScripts   = useHooks ?
@@ -318,6 +319,7 @@ async function generateAllPages(landingPage) {
         await removeUnusedTags(allPages, processingParams);
 
         await removeTemplates(processingParams);
+
     } catch (err) {
         logger.error(err);
         await cleanOldFiles();
@@ -381,7 +383,7 @@ async function removeUnusedTags(pages, resourcePath) {
     await emplaceImpl(FAVICON_DIR_TAG, webpackB, webpackB, faviconTemplate);
 
     const indexer        = await getIndexer();
-    const assetIsPresent = isNotEmpty(Object.keys(indexer.saved));
+    const assetIsPresent = fs.existsSync(path.join(publicB, ASSETS_DIR));
     await emplaceImpl(
         ASSETS_PRESENT_TAG, webpackB, webpackB,
         assetIsPresent ? 'true' : 'false');
@@ -1637,22 +1639,72 @@ function extractStyles(doc) {
 }
 
 function escapeAllJSXQuotes(text) {
-    const matches =
-        Array.from(text.matchAll(/>((?:[^<>]*?(?:\{|\})[^<>]*?)+)</gm))
-            .sort((one, other) => other.index - one.index);
+    let   escapedText = '';
+    let   idx = 0, start = idx;
+    const comments = [
+        extractComments(text, '/*', '*/'), extractComments(text, '<!--', '-->')
+    ].flat();
 
-    for (const match of matches) {
-        const start = match.index + 1;                    // includes `>`
-        const end   = match.index + match[0].length - 1;  // includes `<`
-        const repl  = match[1].replace(/(\{|\})/g, `{'$1'}`);
+    while (idx !== -1) {
+        start = nextOf(idx, text, '>');
+        if (start === -1)
+            break;
+        const end = nextOf(start, text, '<');
+        if (end === -1)
+            break;
 
-        assert(text[start - 1] === '>');
-        assert(text[end] === '<');
+        if (isInComment(text, start, end, comments)) {
+            escapedText += text.slice(idx, end + 1);
+            idx = end + 1;
+            continue;
+        }
 
-        text = text.substring(0, start) + repl + text.substring(end);
+        const stripped = escapeJSXQuotesIn(text.slice(start, end + 1));
+        escapedText += text.slice(idx, start) + stripped;
+
+        idx = end + 1;
     }
 
-    return text;
+    if (idx !== -1)
+        escapedText += text.slice(idx);
+
+    return escapedText;
+}
+
+function escapeJSXQuotesIn(text) {
+    return text.replace(/(\{|\})/g, `{'$1'}`);
+}
+
+function nextOf(from, haystack, needle) {
+    const idx = haystack.slice(from).indexOf(needle);
+    return idx === -1 ? idx : from + idx;
+}
+
+function isInComment(text, start, end, comments) {
+    return comments.find(
+        comment => start >= comment.start && end <= comment.end);
+}
+
+function extractComments(context, sDelim, eDelim) {
+    const comments = [];
+    let   idx      = 0;
+    while (idx !== -1) {
+        const start = nextOf(idx, context, sDelim);
+        if (start === -1)
+            break;
+        const end = nextOf(start, context, eDelim);
+        if (end === -1)
+            break;
+        comments.push({
+            start: start,
+            end: end,
+            shift: Math.min(sDelim.length, eDelim.length)
+        });
+
+        idx = end + eDelim.length;
+    }
+
+    return comments;
 }
 
 function extractAllScripts(doc) {
@@ -1746,12 +1798,24 @@ function reconstructTree(node) {
 
 function modifyAttributes(node, attributes) {
     Object.keys(attributes).forEach(attr => {
-        attr = attr.toLowerCase();
+        const provided = attr;
+        attr           = attr.toLowerCase();
         let ns;
+        /*\
+         * Values of some attributes start with quotes
+         * hence, they have to be escaped with '{' '}'
+         * remove, this types of quote and replace
+         * with alternating quotations.
+         * e.g data-json={"key": "value"} is replaced this:
+         *  data-json='"key": "value"'.
+        \*/
+
+        modifyEscapeIntent(node, provided, attributes);
         if ((ns = isNamespaced(attr))) {
             const modTag    = ns[1] + ns[2][0].toUpperCase() + ns[2].slice(1);
-            const attrValue = node.getAttribute(attr);
+            const attrValue = attributes[attr];
             node.setAttributeNS(null, modTag, attrValue);
+            node.removeAttribute(attr);
         } else if (reactAttributesLookup[attr]) {
             const selection = reactAttributesLookup[attr];
             switch (selection.type) {
@@ -1773,8 +1837,6 @@ function modifyAttributes(node, attributes) {
                 }
             }
             node.removeAttribute(attr);
-
-            return;
         }
     });
 }
@@ -1785,6 +1847,16 @@ function isNamespaced(attribute) {
 
 function augment(attr) {
     return REPL_ID + attr;
+}
+
+function modifyEscapeIntent(node, attribute, attributes) {
+    const value = attributes[attribute];
+    if (value.startsWith('{') && value[1] !== '{' && lastEntry(value) === '}') {
+        const mod = '`' + value + '`';
+        node.removeAttribute(attribute);
+        node.setAttribute(attribute, mod);
+        Object.assign(attributes, {...attributes, [attribute]: mod});
+    }
 }
 
 function getAttributes(node) {
@@ -1819,9 +1891,9 @@ function formatStyle(value) {
     const allStyles =
         stylist
             .map(style => {
-                const div   = style.split(':').map(p => p.trim());
-                const one   = div[0];
-                const other = div[1];
+                const div   = style.indexOf(':');
+                const one   = style.slice(0, div);
+                const other = style.slice(div + 1);
                 if (isEmpty(one) || isEmpty(other))
                     return '';
                 const oneMatches = Array.from(one.matchAll(/-([a-z])/gm));
