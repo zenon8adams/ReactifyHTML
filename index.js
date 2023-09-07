@@ -452,15 +452,17 @@ async function emplaceInRoot(scripts, resourcePath) {
             .reduce(
                 (acc, script) => {
                     if (!script.isInline) {
-                        const attrs = refitTags(joinAttrs(
-                            getAttributesRaw(script.script),
-                            {src: script.scriptName}));
-                        return acc + `<script ${attrs}></script>` +
+                        const attrs = getAttributesRaw(script.script);
+                        Object.assign(
+                            attrs, {[augment('type')]: script.mime, ...attrs});
+                        const jAttrs = refitTags(
+                            joinAttrs(attrs, {src: script.scriptName}));
+                        return acc + `<script ${jAttrs}></script>` +
                             '\n\t';
                     } else {
                         return acc + '<script src="' +
                             path.join(script.shortPath, script.scriptName) +
-                            '" type="' + script.mime + '"></script>\n\t';
+                            '" type="' + script.mime + '" defer></script>\n\t';
                     }
                 },
                 '\n\t')
@@ -476,10 +478,10 @@ async function emplaceInRoot(scripts, resourcePath) {
 function deriveNameFrom(filePath) {
     const {ext} = path.parse(filePath);
     const name  = filePath.slice(0, -ext.length);
-    const page  = Array.from(name.matchAll(/([a-zA-Z]+)/g))
+    const page  = Array.from(name.matchAll(/([a-zA-Z0-9_]+)/g))
                      .reduce((acc, m) => acc + capitalize(m[1]), '')
                      .concat('Page');
-    return page;
+    return page.match(/^[0-9]/) ? 'A_' + page : page;
 }
 
 function capitalize(str) {
@@ -823,7 +825,7 @@ async function relinkPages(pages, resourcePath) {
 
         const pageFullPath = path.join(pageB, page.info.path);
         const importDecl   = strJoin(
-              `import { Navigate, useNavigate } from "react-router-dom";`,
+              `import { useNavigate } from "react-router-dom";`,
               `@{${REACT_IMPORT_TAG}}`, '\n');
         const navDecl = `\nconst navigate = useNavigate();`;
         const navFun  = strJoin(
@@ -914,7 +916,8 @@ async function emplaceHTML(pages, resourcePath) {
 function useJSXStyleComments(rawHTML) {
     assert(isDefined(rawHTML) && isString(rawHTML));
 
-    return rawHTML.replace(/<!--((?:.|\n|\r)*?)-->/gm, '{/*\$1*/}');
+    return rawHTML.replace(/<!--([^]*?)-->/gm, '{/*\$1*/}')
+        .replace(/(\/\*[^\/]*?(?<=\*)\/(?!\}))/gm, '{\$1}');
 }
 
 async function emplaceImpl(tag, readPath, writePath, replacement) {
@@ -1049,7 +1052,7 @@ async function updateMissingLinks(doc, pageSourceFile, resourcePath) {
         if (isNotBehaved(repl))
             continue;
 
-        const augmentedPath = path.join(ASSETS_DIR, finalDir, repl.base);
+        const augmentedPath = '/' + path.join(ASSETS_DIR, finalDir, repl.base);
         if (asset.isHTMLElement) {
             // All attributes have been augmented at this point
             // changing it requires a change in the augmented version
@@ -1104,7 +1107,10 @@ function generateAssetsFinalDirectory(assetBundle) {
 
     const {usePathRelativeIndex} = converterConfig;
     const asset                  = parseFile(assetBundle.value);
-    const assetDir               = removeBackLinks(path.normalize(asset.dir));
+    let   assetDir               = removeBackLinks(path.normalize(asset.dir));
+
+    if (assetDir.startsWith(ASSETS_DIR))
+        assetDir = assetDir.slice(ASSETS_DIR.length);
 
     assert(isBoolean(usePathRelativeIndex));
 
@@ -1662,13 +1668,8 @@ function escapeAllJSXQuotes(text) {
         if (start === -1 || end === -1)
             break;
 
-        if (isInComment(text, start, end, comments)) {
-            escapedText += text.slice(idx, end + 1);
-            idx = end + 1;
-            continue;
-        }
-
-        const stripped = escapeJSXQuotesIn(text.slice(start, end + 1));
+        const stripped =
+            escapeJSXQuotesIn(text.slice(start, end + 1), start, comments);
         escapedText += text.slice(idx, start) + stripped;
 
         idx = end + 1;
@@ -1680,8 +1681,19 @@ function escapeAllJSXQuotes(text) {
     return escapedText;
 }
 
-function escapeJSXQuotesIn(text) {
-    return text.replace(/(\{|\})/g, `{'$1'}`);
+function escapeJSXQuotesIn(text, off, comments) {
+    const matches = Array.from(text.matchAll(/(\{|\})/g))
+                        .sort((one, other) => other.index - one.index);
+    for (const match of matches) {
+        const index = off + match.index;
+        if (isInComment(text, index, comments))
+            continue;
+
+        text = text.substring(0, match.index) + '{\'' + match[1] + '\'}' +
+            text.substring(match.index + match[0].length);
+    }
+
+    return text;
 }
 
 function nextOf(from, haystack, needle) {
@@ -1689,9 +1701,8 @@ function nextOf(from, haystack, needle) {
     return idx === -1 ? idx : from + idx;
 }
 
-function isInComment(text, start, end, comments) {
-    return comments.find(
-        comment => start >= comment.start && end <= comment.end);
+function isInComment(text, pos, comments) {
+    return comments.find(comment => pos >= comment.start && pos <= comment.end);
 }
 
 function matchClosely(pos, context, sDelim, eDelim) {
@@ -1704,13 +1715,10 @@ function matchClosely(pos, context, sDelim, eDelim) {
         if (end === -1)
             break;
         const nextsDelim = nextOf(start + 1, context, sDelim);
-        if (nextsDelim === -1) {
-            spos = start;
-            epos = end;
-            break;
-        } else if (nextsDelim < end) {
-            spos = pos = start;
-            epos       = end;
+        spos             = start;
+        epos             = end;
+        if (nextsDelim < end) {
+            pos = start + 1;
         } else {
             break;
         }
@@ -1925,7 +1933,7 @@ function formatStyle(value) {
         stylist
             .map(style => {
                 const div           = style.indexOf(':');
-                const one           = style.slice(0, div).trim();
+                const one           = style.slice(0, div).trim().toLowerCase();
                 const other         = style.slice(div + 1).trim();
                 const isUserDefined = one.startsWith('--');
                 if (isEmpty(one) || isEmpty(other))
@@ -1937,9 +1945,9 @@ function formatStyle(value) {
                     return `${one}: \`${other}\``;
                 }
 
-
                 const jointOne = oneMatches.reduce((acc, m, i) => {
-                    const section = m.input.substring(acc.start, m.index) +
+                    const section =
+                        m.input.substring(acc.start, m.index).toLowerCase() +
                         m[1].toUpperCase();
                     acc.start = m.index + m[0].length;
                     return {...acc, str: acc.str + section};
