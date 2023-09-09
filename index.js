@@ -302,6 +302,8 @@ async function generateAllPages(landingPage) {
 
         logger.info('allPages: ', allPages);
 
+        allPageMetas = uniquefyMetas(allPageMetas);
+
         await emplaceStyle(allStyles, processingParams);
         const appliedMetas = await emplaceMetas(allPageMetas, processingParams);
         await                      emplaceLinks(allLinks, processingParams);
@@ -499,6 +501,52 @@ function strJoin() {
         '');
 
     return single;
+}
+
+function uniquefyMetas(metas) {
+    const metaValues =
+        metas
+            .map((meta, idx) => ({
+                     search:
+                         Object.values(meta).map(v => v.toLowerCase()).sort(),
+                     recovery: idx
+                 }))
+            .sort((one, other) => {
+                const isLess    = one.search < other.search;
+                const isGreater = one.search > other.search;
+                return isLess ? -1 : isGreater ? 1 : 0;
+            });
+
+    const uniqueValues = [];
+    let   active       = metaValues[0];
+    for (let i = 1; i < metaValues.length; ++i) {
+        const other = metaValues[i];
+        if (!isSuperSetOf(other.search, active.search)) {
+            uniqueValues.push(active);
+        }
+        active = other;
+    }
+
+    if (isNotEmpty(uniqueValues))
+        uniqueValues.push(active);
+
+    return uniqueValues.map(v => metas[v.recovery]);
+}
+
+// Requires arguments to be sorted.
+function isSuperSetOf(standard, given) {
+    const minLen = Math.min(standard.length, given.length);
+    const sMin   = standard.slice(0, minLen);
+    const gMin   = given.slice(0, minLen);
+    if (minLen !== given.length)
+        return false;
+
+    for (let i = 0; i < minLen; ++i) {
+        if (sMin[i] !== gMin[i])
+            return false;
+    }
+
+    return true;
 }
 
 function uniquefyPages(newPages, allPages, mainDir) {
