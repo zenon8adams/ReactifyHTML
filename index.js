@@ -367,6 +367,12 @@ async function generateAllPages(landingPage) {
 
 async function resolveLandingPage(providedPath) {
     try {
+        // Make sure to create temporary directory
+        // if we need it.
+        if (!fs.existsSync(temporaryDir)) {
+            await fsp.mkdir(temporaryDir, {recursive: true});
+        }
+
         if (isAbsoluteURI(providedPath)) {
             return await downloadProject(providedPath);
         }
@@ -431,10 +437,6 @@ async function decompressZipOrGzipImpl(archivePath, decompressor) {
     assert(
         decompressor === Decompressor.Zip ||
         decompressor === Decompressor.Gzip);
-
-    if (!fs.existsSync(temporaryDir)) {
-        await fsp.mkdir(temporaryDir, {recursive: true});
-    }
 
     const decomps  = Object.values(Decompressor);
     const rootPath = await[decompressZipImpl, decompressGzipImpl].at(
