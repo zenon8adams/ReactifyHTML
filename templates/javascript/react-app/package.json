@@ -23,15 +23,16 @@
     "copy-webpack-plugin": "^11.0.0",
     "dotenv": "^16.3.1",
     "postcss": "^8.4.16",
+    "prettier": "3.0.3",
     "process": "^0.11.10",
     "webpack": "^5.88.2",
     "webpack-cli": "^5.1.4"
   },
+  "packageManager": "yarn@1.22.19",
   "scripts": {
     "start": "webpack serve",
     "build": "webpack",
-    "test": "react-scripts test",
-    "eject": "react-scripts eject"
+    "format": "prettier --write src/**/*.{js,jsx,ts,tsx,css,md,json,scss} --config ./.prettierrc"
   },
   "eslintConfig": {
     "extends": [

@@ -23,26 +23,35 @@
  *   DEALINGS IN THE SOFTWARE.
  */
 'use strict';
+import fsExtra from 'fs-extra';
+const {move: moveAll, copy: duplicate} = fsExtra;
+import os from 'node:os';
+import fs from 'node:fs';
+import fsp from 'node:fs/promises';
+import readline from 'node:readline/promises';
+import zlib from 'node:zlib';
+import path from 'node:path';
+import process from 'node:process';
+import {fileURLToPath} from 'node:url';
+import {Transform} from 'node:stream';
+import jsdom from 'jsdom';
+import {rimraf} from 'rimraf';
+import util from 'util';
+import tar from 'tar';
+import yauzl from 'yauzl';
+import {dirname} from 'path';
+import mimeDB from 'mime-db';
 
-const fsExtra   = require('fs-extra');
-const moveAll   = fsExtra.move;
-const duplicate = fsExtra.copy;
-const os        = require('node:os');
-const fs        = require('node:fs');
-const fsp       = require('node:fs/promises');
-const readline  = require('node:readline/promises');
-const jsdom     = require('jsdom');
-const path      = require('node:path');
-const process   = require('node:process')
-const {rimraf}  = require('rimraf');
-const util      = require('util');
+const __dirname    = dirname(fileURLToPath(import.meta.url));
+const sessionID    = randomCounter(8);
+const temporaryDir = path.join(os.tmpdir(), 'ReactifyHTML', sessionID);
 
 // Logger dependencies
-const winston                                       = require('winston');
+import winston from 'winston';
 const {combine, colorize, align, printf, timestamp} = winston.format;
 
 // Assertion dependencies
-const assert = require('assert');
+import assert from 'assert';
 
 const REPL_ID = 'hTmL';
 
@@ -102,13 +111,19 @@ const converterConfig = {
     searchDepth: -1,
     deduceAssetsPathFromBaseDirectory: true,
     usePathRelativeIndex: true,
-    archive: false
+    archive: false,
+    entryPoint: 'index.html'
 };
 
 const MisMatchPolicy = Object.freeze({
     Overwrite: Symbol('overwrite'),
     Merge: Symbol('merge'),
     Leave: Symbol('leave')
+});
+
+const Decompressor = Object.freeze({
+    Zip: Symbol('zip'),
+    Gzip: Symbol('gz|tgz|tar.gz'),
 });
 
 // Make it unmodifiable.
@@ -134,10 +149,9 @@ logger.info = function() {
     info(util.format.apply(null, arguments));
 };
 
-logger.error =
-    function() {
+logger.error = function() {
     error(serializeError(arguments[0]));
-}
+};
 
 function serializeError(error) {
     // Deep copy the string since nodejs doesn't want to
@@ -145,8 +159,9 @@ function serializeError(error) {
     return deepClone(error.stack);
 }
 
-const mainSourceFile = process.argv[2] ?? 'examples/index.html';
-const mainSourceDir  = path.dirname(mainSourceFile);
+const initialPath = process.argv[2] ?? `examples/${converterConfig.entryPoint}`;
+const mainSourceFile = await resolveLandingPage(initialPath);
+const                        mainSourceDir = getRootDirectory(mainSourceFile);
 
 modifyLock(mainSourceFile, mainSourceDir);
 
@@ -221,6 +236,7 @@ async function generateAllPages(landingPage) {
 
                 reconstructTree(root);
 
+
                 // FIXME: Scripts can be loaded either via local hooks
                 //  or in the global index page.
                 const scripts    = extractAllScripts(doc);
@@ -288,6 +304,7 @@ async function generateAllPages(landingPage) {
             }
         } catch (err) {
             logger.error(err);
+            throw err;
         }
 
         return pagesStream;
@@ -305,8 +322,8 @@ async function generateAllPages(landingPage) {
         allPageMetas = uniquefyMetas(allPageMetas);
 
         await emplaceStyle(allStyles, processingParams);
-        const appliedMetas = await emplaceMetas(allPageMetas, processingParams);
-        await                      emplaceLinks(allLinks, processingParams);
+        await emplaceMetas(allPageMetas, processingParams);
+        await emplaceLinks(allLinks, processingParams);
 
         !useHooks && await addScripts(allScripts, null, processingParams);
 
@@ -323,12 +340,232 @@ async function generateAllPages(landingPage) {
         await removeTemplates(processingParams);
 
     } catch (err) {
+        console.error('Unable to generate project:', initialPath);
+        console.error(err);
         logger.error(err);
         await cleanOldFiles();
+        await cleanTemporaryFiles();
         process.exit(1);
     }
 
+    await cleanTemporaryFiles();
+
     process.exit(0);
+}
+
+async function resolveLandingPage(providedPath) {
+    try {
+        if (isAbsoluteURI(providedPath)) {
+            // FIXME: Implement download project.
+            return downloadProject(providedPath);
+        }
+
+        const functions = {
+            [Decompressor.Zip]: unzipProject,
+            [Decompressor.Gzip]: unGzipProject
+        };
+
+        // Build up an extension lookup for all registered archive file types.
+        const associations =
+            Object.values(Decompressor)
+                .map(
+                    dc => dc.toString()
+                              .replace(/^.+\((.+)\)$/, '$1')
+                              .split('|')
+                              .map(ext => ({[ext]: functions[dc]})))
+                .flat()
+                // Sort the listings by extension length in ascending order
+                // so that longer extension names are matched first.
+                .sort((one, other) => {
+                    const oneLen   = Object.keys(one)[0].length;
+                    const otherLen = Object.keys(other)[0].length;
+                    return otherLen < oneLen ? -1 : oneLen === otherLen ? 0 : 1;
+                })
+                .reduce((acc, cur) => ({...acc, ...cur}), {});
+
+        const {extv2, base} = parseFile(providedPath);
+        if (extv2 === 'html')
+            return providedPath;
+
+        // Match the longest extension name that can be derived from the
+        // basename
+        const ext =
+            Object.keys(associations).find(ex => base.lastIndexOf(ex) !== -1);
+        const selector = associations[ext];
+        if (selector) {
+            return await selector(providedPath, ext);
+        }
+    } catch (err) {
+        logger.info(err);
+    }
+
+    console.error('Unable to resolve provided path:', providedPath);
+    process.exit(1);
+}
+
+function getRootDirectory(file) {
+    return path.dirname(file);
+}
+
+async function unzipProject(providedPath) {
+    return await decompressZipOrGzipImpl(providedPath, Decompressor.Zip);
+}
+
+async function unGzipProject(providedPath) {
+    return await decompressZipOrGzipImpl(providedPath, Decompressor.Gzip);
+}
+
+async function decompressZipOrGzipImpl(archivePath, decompressor) {
+    assert(
+        decompressor === Decompressor.Zip ||
+        decompressor === Decompressor.Gzip);
+
+    const decomps  = Object.values(Decompressor);
+    const rootPath = await[decompressZipImpl, decompressGzipImpl].at(
+        decomps.indexOf(decompressor))(archivePath);
+
+    logger.info('rootPath:', rootPath);
+    const {name} = path.parse(rootPath);
+    let filePath = path.join(temporaryDir, name);
+
+    // We might have guessed wrong. The file we are processing
+    // could have just been a single level compressed file.
+    // Resolve to use directory.
+    if (!fs.existsSync(filePath)) {
+        filePath = path.dirname(filePath);
+    }
+
+    const info = fs.statSync(filePath);
+    if (info.isDirectory) {
+        return findIndexFile(filePath);
+    } else {
+        // For nested archives such as .tar.gz
+        return await resolveLandingPage(filePath);
+    }
+}
+
+async function decompressGzipImpl(archivePath) {
+    let seenRootDir = false;
+    let rootDir     = '';
+    return new Promise(async (resolve, reject) => {
+        const readStream  = fs.createReadStream(archivePath);
+        const unzipStream = zlib.createGunzip();
+        if (!fs.existsSync(temporaryDir)) {
+            await fsp.mkdir(temporaryDir, {recursive: true});
+        }
+        unzipStream.pipe(tar.extract({
+            cwd: temporaryDir,
+            onentry: (entry) => {
+                [rootDir, seenRootDir] =
+                    checkIfActuallyRoot(rootDir, entry.path);
+            }
+        }));
+
+        readStream.pipe(unzipStream);
+        readStream.on('error', reject);
+        unzipStream.on('error', reject);
+        unzipStream.on('finish', () => resolve(seenRootDir ? rootDir : './'));
+    })
+};
+
+async function decompressZipImpl(archivePath) {
+    let handleCount = 0;
+    let rootDir     = '';
+    let seenRootDir = false;
+    return new Promise((resolve, reject) => {
+        yauzl.open(archivePath, {lazyEntries: true}, async (err, zipfile) => {
+            // track when we've closed all our file handles
+            function incrementHandleCount() {
+                handleCount++;
+            }
+            function decrementHandleCount() {
+                handleCount--;
+                if (handleCount === 0) {
+                    resolve(seenRootDir ? rootDir : './');
+                }
+            }
+
+            incrementHandleCount();
+            zipfile.on('close', function() {
+                decrementHandleCount();
+            });
+
+            zipfile.readEntry();
+            zipfile.on('entry', async (entry) => {
+                const destPath = path.join(temporaryDir, entry.fileName);
+                [rootDir, seenRootDir] =
+                    checkIfActuallyRoot(rootDir, entry.fileName);
+
+                logger.info('Processing:', destPath);
+                if (/\/$/.test(entry.fileName)) {
+                    // directory file names end with '/'
+                    await fsp.mkdir(destPath, {recursive: true});
+                    zipfile.readEntry();
+                } else {
+                    // ensure parent directory exists
+                    if (!fs.existsSync(path.dirname(destPath))) {
+                        await fsp.mkdir(path.dirname(destPath));
+                    }
+                    zipfile.openReadStream(entry, function(err, readStream) {
+                        if (err) {
+                            reject(err);
+                            return;
+                        }
+
+                        const filter      = new Transform();
+                        filter._transform = function(chunk, encoding, cb) {
+                            cb(null, chunk);
+                        };
+                        filter._flush = function(cb) {
+                            cb();
+                            zipfile.readEntry();
+                        };
+
+                        // pump file contents
+                        const writeStream = fs.createWriteStream(destPath);
+                        incrementHandleCount();
+                        writeStream.on('close', decrementHandleCount);
+                        readStream.pipe(filter).pipe(writeStream);
+                    });
+                }
+            });
+        });
+    });
+}
+
+function checkIfActuallyRoot(maybeRootDir, readPath) {
+    if (isEmpty(maybeRootDir)) {
+        maybeRootDir = readPath;
+    }
+
+    if (path.relative(maybeRootDir, readPath).startsWith('..')) {
+        return [maybeRootDir, false];
+    }
+
+    return [maybeRootDir, true];
+}
+
+async function findIndexFile(providedPath) {
+    async function findIndexFileImpl(initialPath) {
+        const directoryQueue    = [];
+        const directoryIterator = await fsp.readdir(initialPath);
+        for (const file of directoryIterator) {
+            const filePath    = path.join(initialPath, file);
+            const stat        = fs.statSync(filePath);
+            const isDirectory = stat.isDirectory(filePath);
+
+            if (file === converterConfig.entryPoint) {
+                return filePath;
+            } else if (isDirectory) {
+                directoryQueue.push(filePath);
+            }
+        }
+        for (const directory of directoryQueue) {
+            await findIndexFileImpl(directory);
+        }
+    }
+
+    return await findIndexFileImpl(providedPath);
 }
 
 function deepClone(str) {
@@ -1444,7 +1681,7 @@ function buildAssetLookup() {
     if (buildAssetLookup.assetDirLookup)
         return buildAssetLookup.assetDirLookup;
 
-    const mimeDatabase = mimeDB();
+    const mimeDatabase = mimeDB;
     const assetDirLookup =
         Object.keys(mimeDatabase)
             .filter((mimeKey) => mimeDatabase[mimeKey].extensions)
@@ -1454,12 +1691,6 @@ function buildAssetLookup() {
             .reduce((acc, cur) => ({...acc, ...cur.shift()}), {});
 
     return buildAssetLookup.assetDirLookup = assetDirLookup;
-}
-
-function mimeDB() {
-    if (mimeDB.mimeDB)
-        return mimeDB.mimeDB;
-    return mimeDB.mimeDB = require('mime-db');
 }
 
 function isVersioned(file) {
@@ -1553,6 +1784,13 @@ async function cleanOldFiles() {
     const buildDirFullPath = fullPathOf(BUILD_DIR);
     try {
         await deleteDirectory(buildDirFullPath);
+    } catch (err) {
+    }
+}
+
+async function cleanTemporaryFiles() {
+    try {
+        await deleteDirectory(temporaryDir);
     } catch (err) {
     }
 }
@@ -1820,7 +2058,7 @@ function extractAllScripts(doc) {
         let   src  = attrs[SRC];
         logger.info(attrs, mime, src);
 
-        const mimeDBEntry = mimeDB()[mime];
+        const mimeDBEntry = mimeDB[mime];
         assert(isBehaved(mimeDBEntry));
         const extension = mimeDBEntry?.extensions?.[0] ?? 'js';
 
