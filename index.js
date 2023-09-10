@@ -432,6 +432,10 @@ async function decompressZipOrGzipImpl(archivePath, decompressor) {
         decompressor === Decompressor.Zip ||
         decompressor === Decompressor.Gzip);
 
+    if (!fs.existsSync(temporaryDir)) {
+        await fsp.mkdir(temporaryDir, {recursive: true});
+    }
+
     const decomps  = Object.values(Decompressor);
     const rootPath = await[decompressZipImpl, decompressGzipImpl].at(
         decomps.indexOf(decompressor))(archivePath);
@@ -461,9 +465,6 @@ async function decompressGzipImpl(archivePath) {
     return new Promise(async (resolve, reject) => {
         const readStream  = fs.createReadStream(archivePath);
         const unzipStream = zlib.createGunzip();
-        if (!fs.existsSync(temporaryDir)) {
-            await fsp.mkdir(temporaryDir, {recursive: true});
-        }
         unzipStream.pipe(tar.extract({
             cwd: temporaryDir,
             onentry: (entry) => {
@@ -583,10 +584,7 @@ async function downloadProject(url, original) {
     const {base} = path.parse(original ?? url);
     const scheme = url.slice(0, url.indexOf('://'));
     assert(scheme === 'http' || scheme === 'https');
-    const protocol = [http, https].at(scheme === 'https');
-    if (!fs.existsSync(temporaryDir)) {
-        await fsp.mkdir(temporaryDir, {recursive: true});
-    }
+    const protocol     = [http, https].at(scheme === 'https');
     const downloadPath = path.join(temporaryDir, base);
     return new Promise((resolve, reject) => {
                protocol.get(url, (response) => {
