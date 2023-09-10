@@ -12,3 +12,4 @@ TabWidth: 4
 ContinuationIndentWidth: 4
 SortIncludes: true
 SortUsingDeclarations: true
+JavaScriptWrapImports: true
