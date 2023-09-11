@@ -32,7 +32,7 @@
   "scripts": {
     "start": "webpack serve",
     "build": "webpack",
-    "format": "prettier --write src/**/*.{js,jsx,ts,tsx,css,md,json,scss} --config ./.prettierrc"
+    "format": "prettier --write 'src/**/*.{js,jsx,ts,tsx,css,md,json,scss}' --config ./.prettierrc"
   },
   "eslintConfig": {
     "extends": [
