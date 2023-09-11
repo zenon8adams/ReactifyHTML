@@ -481,8 +481,7 @@ async function decompressGzipImpl(archivePath) {
         readStream.pipe(unzipStream);
         readStream.on('error', reject);
         unzipStream.on('error', reject);
-        unzipStream.on(
-            'finish', () => resolve(seenRootDir ? rootDir : relativePoint()));
+        unzipStream.on('finish', () => resolve(seenRootDir ? rootDir : './'));
     })
 };
 
@@ -499,7 +498,7 @@ async function decompressZipImpl(archivePath) {
             function decrementHandleCount() {
                 handleCount--;
                 if (handleCount === 0) {
-                    resolve(seenRootDir ? rootDir : relativePoint());
+                    resolve(seenRootDir ? rootDir : './');
                 }
             }
 
@@ -667,10 +666,10 @@ async function removeUnusedTags(pages, resourcePath) {
     await emplaceImpl(ROOT_ATTR_TAG, rootB, rootB, ' lang="en"');
     await emplaceImpl(ENV_PRE_TAG, webpackB, webpackB, '');
 
-    const favicon        = linkTags.filter(link => link.rel === 'icon')[0];
-    const publicBaseName = path.basename(publicB);
-    const faviconTemplate =
-        buildPathTemplateFrom(path.join(publicBaseName, favicon.href));
+    const favicon         = linkTags.filter(link => link.rel === 'icon')[0];
+    const publicBaseName  = path.basename(publicB);
+    const faviconTemplate = useOSIndependentPath(
+        buildPathTemplateFrom(path.join(publicBaseName, favicon.href)));
 
     await emplaceImpl(FAVICON_DIR_TAG, webpackB, webpackB, faviconTemplate);
 
@@ -747,13 +746,15 @@ async function emplaceInRoot(scripts, resourcePath) {
                         const attrs = getAttributesRaw(script.script);
                         Object.assign(
                             attrs, {[augment('type')]: script.mime, ...attrs});
-                        const jAttrs = refitTags(
-                            joinAttrs(attrs, {src: script.scriptName}));
+                        const jAttrs = refitTags(joinAttrs(
+                            attrs,
+                            {src: useOSIndependentPath(script.scriptName)}));
                         return acc + `<script ${jAttrs}></script>` +
                             '\n\t';
                     } else {
                         return acc + '<script src="' +
-                            path.join(script.shortPath, script.scriptName) +
+                            useOSIndependentPath(path.join(
+                                script.shortPath, script.scriptName)) +
                             '" type="' + script.mime + '" defer></script>\n\t';
                     }
                 },
@@ -765,10 +766,6 @@ async function emplaceInRoot(scripts, resourcePath) {
 
     await emplaceImpl(SCRIPT_INC_TAG, rootB, rootB, scriptsList);
     await removeHooks('*', resourcePath);
-}
-
-function relativePoint() {
-    return path.join('.', path.sep);
 }
 
 function deriveNameFrom(filePath) {
@@ -915,16 +912,15 @@ async function emplaceHooks(scripts, pagePath, resourcePath) {
     assert(isDefined(pageB));
     assert(isDefined(srcB));
 
-    const scriptsList = scripts.reduce(
+    const scriptsList = useOSIndependentPath(scripts.reduce(
         (acc, script) => acc + '\'' + script.scriptName + '\'' +
             ',\n\t',
-        '\n\t');
+        '\n\t'));
     const hooksPath   = path.join(srcB, 'hooks/useScript');
-    const relHookIncl = path.relative(pageB, srcB);
+    const relHookIncl = useOSIndependentPath(path.relative(pageB, srcB));
     const hook =
         `\n\tconst [loadedScripts, error] = useScript([${scriptsList}]);`;
-    const include =
-        `\nimport useScript from '${relativePoint()}${relHookIncl}';`;
+    const include = `\nimport useScript from './${relHookIncl}';`;
 
     const pageFullPath = path.join(pageB, pagePath);
 
@@ -993,7 +989,7 @@ async function emplaceLinksOrMetasImpl(linksOrMetas, isLink, resourcePath) {
     const stringLinksOrMetas =
         finalList
             .map(current => {
-                const joint = joinAttrs(current);
+                const joint = useOSIndependentPath(joinAttrs(current));
                 return tag + joint + '/>';
             })
             .reduce((cur, linkOrMeta) => cur + linkOrMeta + '\n', '\n');
@@ -1098,8 +1094,7 @@ async function emplaceStyle(content, resourcePath) {
         return;
     }
 
-    const styleInclude =
-        `\nimport '${relativePoint()}${path.basename(resourcePath.style)}';`;
+    const styleInclude = `\nimport './${path.basename(resourcePath.style)}';`;
     await emplaceImpl(STYLE_TAG, style, styleB, content);
     await emplaceImpl(STYLE_INC_TAG, appB, appB, styleInclude);
     await emplaceImpl(STYLE_INC_TAG, scriptB, scriptB, styleInclude);
@@ -1222,10 +1217,9 @@ async function emplaceApp(pages, resourcePath) {
             allRoutes, `<Route`, `path="${pageUrl}"`,
             `element={<${name} />} />\n\t\t`, ' ');
 
-        const pageIncl = path.join('pages', realname);
+        const pageIncl = strJoin('.', 'pages', realname, '/');
 
-        routesIncl = routesIncl +
-            `\nimport ${name} from '${relativePoint()}${pageIncl}';`;
+        routesIncl = routesIncl + `\nimport ${name} from '${pageIncl}';`;
 
         Object.assign(page, {...page, route: pageUrl});
     }
@@ -1238,8 +1232,9 @@ async function emplaceApp(pages, resourcePath) {
 function getPageRoute(page) {
     const realname =
         page.info.path.slice(0, -path.extname(page.info.path).length);
-    const pageUrl =
-        page.isLanding ? '/' : path.normalize('/' + realname.toLowerCase());
+    const pageUrl = page.isLanding ?
+        '/' :
+        useOSIndependentPath(path.normalize('/' + realname.toLowerCase()));
 
     return [pageUrl, realname];
 }
@@ -1353,8 +1348,9 @@ async function updateStyleLinks(doc, pageSourceFile, resourcePath, style) {
 
         const finalDir       = generateAssetsFinalDirectory(link);
         const assetsRealPath = path.join(ASSETS_DIR, finalDir);
-        const assetFile = path.join(assetsRealPath, path.basename(link.value));
-        const recInfo   = fixables[link.recovery];
+        const assetFile      = useOSIndependentPath(
+                 path.join(assetsRealPath, path.basename(link.value)));
+        const recInfo = fixables[link.recovery];
         style = style.substring(0, recInfo.index) + `url("/${assetFile}")` +
             style.substring(recInfo.index + recInfo[0].length);
     }
@@ -1470,6 +1466,10 @@ function generateAssetsFinalDirectory(assetBundle) {
     }
 
     return assetDir;
+}
+
+function useOSIndependentPath(p) {
+    return p.replace(new RegExp(`${path.sep}`, 'g'), '/');
 }
 
 /*\
