@@ -13,11 +13,12 @@ env:
 
 jobs:
   build:
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.os }}
 
     strategy:
       matrix:
         node-version: [18.x, 20.x]
+        os: [macOS-latest, windows-latest, ubuntu-latest]
 
     steps:
       - uses: actions/checkout@v2
@@ -42,6 +43,10 @@ jobs:
         working-directory: build
         run: yarn install
 
+      - name: Format code (Index)
+        working-directory: build
+        run: yarn run format
+
       - name: Build CRA (Index)
         working-directory: build
         run: yarn run build
@@ -53,10 +58,13 @@ jobs:
           post: |
               echo "Post motem"
               cat logs/progress-$(date +'%Y-%m-%d').log
-
       - name: Install build dependencies (Local archive)
         working-directory: build
         run: yarn install
+
+      - name: Format code (Local archive)
+        working-directory: build
+        run: yarn run format
 
       - name: Build CRA (Local archive)
         working-directory: build
@@ -69,10 +77,13 @@ jobs:
           post: |
               echo "Post motem"
               cat logs/progress-$(date +'%Y-%m-%d').log
-
       - name: Install build dependencies (Online archive)
         working-directory: build
         run: yarn install
+
+      - name: Format code (Online archive)
+        working-directory: build
+        run: yarn run format
 
       - name: Build CRA (Online archive)
         working-directory: build
