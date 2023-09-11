@@ -172,7 +172,8 @@ function serializeError(error) {
     return deepClone(error.stack);
 }
 
-const initialPath = process.argv[2] ?? `examples/${converterConfig.entryPoint}`;
+const initialPath =
+    process.argv[2] ?? path.join('examples', converterConfig.entryPoint);
 const mainSourceFile = await resolveLandingPage(initialPath);
 const                        mainSourceDir = getRootDirectory(mainSourceFile);
 
@@ -457,6 +458,8 @@ async function decompressZipOrGzipImpl(archivePath, decompressor) {
         return findIndexFile(filePath);
     } else {
         // For nested archives such as .tar.gz
+        // or previously resolved path cyling
+        // back to this point.
         return await resolveLandingPage(filePath);
     }
 }
@@ -478,7 +481,8 @@ async function decompressGzipImpl(archivePath) {
         readStream.pipe(unzipStream);
         readStream.on('error', reject);
         unzipStream.on('error', reject);
-        unzipStream.on('finish', () => resolve(seenRootDir ? rootDir : './'));
+        unzipStream.on(
+            'finish', () => resolve(seenRootDir ? rootDir : relativePoint()));
     })
 };
 
@@ -495,7 +499,7 @@ async function decompressZipImpl(archivePath) {
             function decrementHandleCount() {
                 handleCount--;
                 if (handleCount === 0) {
-                    resolve(seenRootDir ? rootDir : './');
+                    resolve(seenRootDir ? rootDir : relativePoint());
                 }
             }
 
@@ -763,6 +767,10 @@ async function emplaceInRoot(scripts, resourcePath) {
     await removeHooks('*', resourcePath);
 }
 
+function relativePoint() {
+    return path.join('.', path.sep);
+}
+
 function deriveNameFrom(filePath) {
     const {ext} = path.parse(filePath);
     const name  = filePath.slice(0, -ext.length);
@@ -915,7 +923,8 @@ async function emplaceHooks(scripts, pagePath, resourcePath) {
     const relHookIncl = path.relative(pageB, srcB);
     const hook =
         `\n\tconst [loadedScripts, error] = useScript([${scriptsList}]);`;
-    const include = `\nimport useScript from './${relHookIncl}';`;
+    const include =
+        `\nimport useScript from '${relativePoint()}${relHookIncl}';`;
 
     const pageFullPath = path.join(pageB, pagePath);
 
@@ -1089,7 +1098,8 @@ async function emplaceStyle(content, resourcePath) {
         return;
     }
 
-    const styleInclude = `\nimport './${path.basename(resourcePath.style)}';`;
+    const styleInclude =
+        `\nimport '${relativePoint()}${path.basename(resourcePath.style)}';`;
     await emplaceImpl(STYLE_TAG, style, styleB, content);
     await emplaceImpl(STYLE_INC_TAG, appB, appB, styleInclude);
     await emplaceImpl(STYLE_INC_TAG, scriptB, scriptB, styleInclude);
@@ -1214,7 +1224,8 @@ async function emplaceApp(pages, resourcePath) {
 
         const pageIncl = path.join('pages', realname);
 
-        routesIncl = routesIncl + `\nimport ${name} from './${pageIncl}';`;
+        routesIncl = routesIncl +
+            `\nimport ${name} from '${relativePoint()}${pageIncl}';`;
 
         Object.assign(page, {...page, route: pageUrl});
     }
