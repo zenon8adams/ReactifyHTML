@@ -35,6 +35,7 @@ jobs:
         run: node index.js
 
       - name: Echo Logs (Index)
+        if: always()
         run: |
              echo "Post motem"
              cat logs/progress-$(date +'%Y-%m-%d').log
@@ -55,6 +56,7 @@ jobs:
         run: node index.js examples/index.zip
 
       - name: Echo Logs (Local archive)
+        if: always()
         run: |
              echo "Post motem"
              cat logs/progress-$(date +'%Y-%m-%d').log
@@ -73,8 +75,9 @@ jobs:
 
       - name: Generate template (Online archive)
         run: node index.js https://github.com/themewagon/mexant/archive/refs/tags/v1.0.0.zip
-
+      
       - name: Echo Logs (Online archive)
+        if: always()
         run: |
              echo "Post motem"
              cat logs/progress-$(date +'%Y-%m-%d').log
