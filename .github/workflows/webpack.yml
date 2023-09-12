@@ -21,10 +21,10 @@ jobs:
         os: [macOS-latest, windows-latest, ubuntu-latest]
 
     steps:
-      - uses: actions/checkout@v2
+      - uses: actions/checkout@v3
 
       - name: Use Node.js ${{ matrix.node-version }}
-        uses: actions/setup-node@v2
+        uses: actions/setup-node@v3
         with:
           node-version: ${{ matrix.node-version }}
 
@@ -32,12 +32,12 @@ jobs:
         run: yarn install
       
       - name: Generate template (Index)
-        uses: gacts/run-and-post-run@v1
-        with:
-          run: node index.js
-          post: |
-              echo "Post motem"
-              cat logs/progress-$(date +'%Y-%m-%d').log
+        run: node index.js
+
+      - name: Echo Logs (Index)
+        run: |
+             echo "Post motem"
+             cat logs/progress-$(date +'%Y-%m-%d').log
 
       - name: Install build dependencies (Index)
         working-directory: build
@@ -52,12 +52,13 @@ jobs:
         run: yarn run build
 
       - name: Generate archive template (Local archive)
-        uses: gacts/run-and-post-run@v1
-        with:
-          run: node index.js examples/index.zip
-          post: |
-              echo "Post motem"
-              cat logs/progress-$(date +'%Y-%m-%d').log
+        run: node index.js examples/index.zip
+
+      - name: Echo Logs (Local archive)
+        run: |
+             echo "Post motem"
+             cat logs/progress-$(date +'%Y-%m-%d').log
+      
       - name: Install build dependencies (Local archive)
         working-directory: build
         run: yarn install
@@ -71,12 +72,13 @@ jobs:
         run: yarn run build
 
       - name: Generate template (Online archive)
-        uses: gacts/run-and-post-run@v1
-        with:
-          run: node index.js https://github.com/themewagon/mexant/archive/refs/tags/v1.0.0.zip
-          post: |
-              echo "Post motem"
-              cat logs/progress-$(date +'%Y-%m-%d').log
+        run: node index.js https://github.com/themewagon/mexant/archive/refs/tags/v1.0.0.zip
+
+      - name: Echo Logs (Online archive)
+        run: |
+             echo "Post motem"
+             cat logs/progress-$(date +'%Y-%m-%d').log
+      
       - name: Install build dependencies (Online archive)
         working-directory: build
         run: yarn install
