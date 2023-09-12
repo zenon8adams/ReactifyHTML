@@ -2372,6 +2372,10 @@ function isURI(link) {
     try {
         const idx = link.indexOf('://');
         if (idx === -1) {
+            // Make a windows compatibility check
+            if (isWindowsPath(link))
+                return false;
+
             new URL(link);
             return true;
         } else {
@@ -2381,6 +2385,10 @@ function isURI(link) {
     } catch (error) {
         return false;
     }
+}
+
+function isWindowsPath(link) {
+    return os.platform() === 'win32' && link.match(/^[a-zA-Z]:\\/);
 }
 
 function lastEntry(list) {
