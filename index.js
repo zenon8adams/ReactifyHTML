@@ -1469,7 +1469,7 @@ function generateAssetsFinalDirectory(assetBundle) {
 }
 
 function useOSIndependentPath(p) {
-    return p.replace(new RegExp(`${path.sep}`, 'g'), '/');
+    return p.replace(new RegExp(`\\${path.sep}`, 'g'), '/');
 }
 
 /*\
