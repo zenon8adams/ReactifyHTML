@@ -128,12 +128,6 @@ const converterConfig = {
     entryPoint: 'index.html'
 };
 
-const MisMatchPolicy = Object.freeze({
-    Overwrite: Symbol('overwrite'),
-    Merge: Symbol('merge'),
-    Leave: Symbol('leave')
-});
-
 const Decompressor = Object.freeze({
     Zip: Symbol('zip'),
     Gzip: Symbol('gz|tgz|tar.gz'),
@@ -144,7 +138,7 @@ modifyLock(converterConfig);
 
 // Logger setup
 const logger = winston.createLogger({
-    level: 'info',
+    level: 'error',
     format: combine(
         timestamp({format: 'YYYY-MM-DD hh:mm:ss.SSS A'}), align(),
         printf((info) => {
@@ -159,17 +153,15 @@ const logger = winston.createLogger({
 const {error, warn, info, verbose, debug, silly} = logger;
 
 logger.info = function() {
-    info(util.format.apply(null, arguments));
+    info(logWrapper(arguments));
 };
 
 logger.error = function() {
-    error(serializeError(arguments[0]));
+    error(logWrapper(arguments));
 };
 
-function serializeError(error) {
-    // Deep copy the string since nodejs doesn't want to
-    // display the error detail as string
-    return deepClone(error.stack);
+function logWrapper() {
+    return util.format.apply(null, arguments);
 }
 
 const initialPath =
@@ -412,10 +404,17 @@ async function resolveLandingPage(providedPath) {
         const selector = associations[ext];
         if (selector) {
             const dir = await selector(providedPath, ext);
+            if (isNotDefined(dir)) {
+                throw new Error(strJoin(
+                    'Could not find', converterConfig.entryPoint,
+                    'file in the provided path', providedPath, ' '));
+            }
             return dir;
         }
     } catch (err) {
-        logger.info(err);
+        logger.error(err);
+        console.error(err.message);
+        process.exit(1);
     }
 
     console.error('Unable to resolve provided path:', providedPath);
@@ -445,13 +444,6 @@ async function decompressZipOrGzipImpl(archivePath, decompressor) {
 
     logger.info('rootPath:', rootPath);
     let filePath = path.join(temporaryDir, rootPath);
-
-    // We might have guessed wrong. The file we are processing
-    // could have just been a single level compressed file.
-    // Resolve to use directory.
-    if (!fs.existsSync(filePath)) {
-        filePath = path.dirname(filePath);
-    }
 
     const info = fs.statSync(filePath);
     if (info.isDirectory()) {
@@ -582,7 +574,10 @@ async function findIndexFile(providedPath) {
         }
     }
 
-    return await findIndexFileImpl(providedPath);
+    const file = await findIndexFileImpl(providedPath);
+    logger.info('Found index file:', file);
+
+    return file;
 }
 
 async function downloadProject(url, original) {
@@ -618,10 +613,6 @@ async function downloadProject(url, original) {
             (next) => next.redirectUrl ?
                 downloadProject(next.redirectUrl, url) :
                 resolveLandingPage(next.path));
-}
-
-function deepClone(str) {
-    return (' ' + str).slice(1);
 }
 
 async function removeTemplates(resourcePath) {
