@@ -366,6 +366,13 @@ async function resolveLandingPage(providedPath) {
             await fsp.mkdir(temporaryDir, {recursive: true});
         }
 
+        // The provided path is a directory, we can try to find
+        // an index file from the path.
+        if (fs.existsSync(providedPath) &&
+            fs.statSync(providedPath).isDirectory()) {
+            return await resolveLandingPage(await findIndexFile(providedPath));
+        }
+
         if (isAbsoluteURI(providedPath)) {
             return await downloadProject(providedPath);
         }
