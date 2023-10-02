@@ -577,12 +577,14 @@ async function findIndexFile(providedPath) {
             }
         }
         for (const directory of directoryQueue) {
-            await findIndexFileImpl(directory);
+            const file = await findIndexFileImpl(directory);
+            if (isDefined(file)) {
+                return file;
+            }
         }
     }
 
     const file = await findIndexFileImpl(providedPath);
-    logger.info('Found index file:', file);
 
     return file;
 }
@@ -1140,12 +1142,25 @@ async function relinkPages(pages, resourcePath) {
             '(?:\\\\.[^"\\\\]*)*"|\'[^\'\\\\]*(?:\\\\.' +
             '[^\'\\\\]*)*\'|`[^`\\\\]*(?:\\\\.[^`\\\\]*)*`))',
         'gm');
+
+    const empty_re = new RegExp('<a[^]+?href[^=]*=(""|\'\'|``)', 'gm');
     for (const page of pages) {
         const {html} = page;
         assert(html);
 
-        const allLinks = Array.from(html.matchAll(re))
-                             .sort((one, other) => other.index - one.index)
+        /*
+         * Anchor attributes of the form href="" resolve to homepage.
+         * We have to prevent default on this kind of links to prevent
+         * the page from reloading.
+         */
+        const allEmptyLinks =
+            Array.from(html.matchAll(empty_re)).sort(sortIndexDesc);
+
+        Object.assign(
+            page, {...page, html: fixEmptyLinks(html, page, allEmptyLinks)});
+
+        const allLinks = Array.from(page.html.matchAll(re))
+                             .sort(sortIndexDesc)
                              .map(m => {
                                  m[1] = path.normalize(
                                      removeRelativeHyperlinks(unQuote(m[1])));
@@ -1153,12 +1168,14 @@ async function relinkPages(pages, resourcePath) {
                              })
                              .filter(m => routeMap.get(m[1]));
 
-        if (isEmpty(allLinks))
-            continue;
+        Object.assign(page, {
+            ...page,
+            html: fixAnchorRoutes(page.html, page, allLinks, routeMap)
+        });
 
-        Object.assign(
-            page,
-            {...page, html: fixAnchorRoutes(html, page, allLinks, routeMap)});
+        if (isEmpty(allLinks)) {
+            continue;
+        }
 
         const pageFullPath = path.join(pageB, page.info.path);
         const importDecl   = strJoin(
@@ -1187,6 +1204,20 @@ function fixAnchorRoutes(html, page, matches, routeMap) {
         const route = routeMap.get(match[1]);
         const repl =
             `"javascript:void(0);" onClick={(e) => navigateTo(e, '${route}')}`;
+
+        html = html.substring(0, start) + repl + html.substring(end);
+    }
+
+    return html;
+}
+
+function fixEmptyLinks(html, page, matches) {
+    for (const match of matches) {
+        const start =
+            match.index + match[0].length - 2 /* Subtract the empty quote */;
+        const end = match.index + match[0].length;
+        const repl =
+            '"javascript:void(0);" onClick={(e) => e.preventDefault()}';
 
         html = html.substring(0, start) + repl + html.substring(end);
     }
@@ -1317,7 +1348,7 @@ async function updateLinksFromLinksContent(
 
 async function updateStyleLinks(doc, pageSourceFile, resourcePath, style) {
     const fixables = Array.from(style.matchAll(/url\s*\(([^\)]+)\)/gm))
-                         .sort((one, other) => other.index - one.index)
+                         .sort(sortIndexDesc)
                          .filter(link => {
                              return !isAbsoluteURI(unQuote(link[1]));
                          });
@@ -1377,7 +1408,6 @@ async function updateMissingLinks(doc, pageSourceFile, resourcePath) {
 
     if (isEmpty(modifiables))
         return;
-
 
     const     resolvedAssetsPath =
         await retrieveAssetsFromGlobalDirectory(pageSourceFile, modifiables);
@@ -1715,9 +1745,6 @@ async function prompt(question) {
     return await rl.question(question);
 }
 
-var rl =
-    readline.createInterface({input: process.stdin, output: process.stdout});
-
 function parseFile(file) {
     const versionPos = file.indexOf('?');
     const realPath =
@@ -2026,8 +2053,7 @@ function escapeAllJSXQuotes(text) {
 }
 
 function escapeJSXQuotesIn(text, off, comments) {
-    const matches = Array.from(text.matchAll(/(\{|\})/g))
-                        .sort((one, other) => other.index - one.index);
+    const matches = Array.from(text.matchAll(/(\{|\})/g)).sort(sortIndexDesc);
     for (const match of matches) {
         const index = off + match.index;
         if (isInComment(text, index, comments))
@@ -2244,6 +2270,18 @@ function modifyEscapeIntent(node, attribute, attributes) {
     }
 }
 
+function getAttributesRaw(node) {
+    const attributeNodeArray = Array.prototype.slice.call(node.attributes);
+    return attributeNodeArray.reduce(
+        (attrs, attribute) => ({
+            ...attrs,
+            [attribute.name.indexOf(REPL_ID) != -1 ?
+                 attribute.name.substr(REPL_ID.length) :
+                 attribute.name]: attribute.value
+        }),
+        {});
+}
+
 function getAttributes(node) {
     const attributeNodeArray = Array.prototype.slice.call(node.attributes);
 
@@ -2255,18 +2293,6 @@ function getAttributes(node) {
         }
         return attrs;
     }, {});
-}
-
-function getAttributesRaw(node) {
-    const attributeNodeArray = Array.prototype.slice.call(node.attributes);
-    return attributeNodeArray.reduce(
-        (attrs, attribute) => ({
-            ...attrs,
-            [attribute.name.indexOf(REPL_ID) != -1 ?
-                 attribute.name.substr(REPL_ID.length) :
-                 attribute.name]: attribute.value
-        }),
-        {});
 }
 
 // Format inline-styles as JSX style {{}}
@@ -2304,6 +2330,10 @@ function formatStyle(value) {
             })
             .filter(style => style.length !== 0);
     return `{{${allStyles.join(', ')}}}`;
+}
+
+function sortIndexDesc(one, other) {
+    return other.index - one.index;
 }
 
 function isArray(any) {
@@ -2403,9 +2433,8 @@ function closeSelfClosingTags(html) {
         // Sort the matches so that the replacement will
         // not have to bother about shifting every other
         // match after replacement of one.
-        const matches = Array.from(html.matchAll(regex))
-                            .sort((one, other) => other.index - one.index);
-        html = expandMatches(tag, html, matches);
+        const matches = Array.from(html.matchAll(regex)).sort(sortIndexDesc);
+        html          = expandMatches(tag, html, matches);
     }
 
     return html;
