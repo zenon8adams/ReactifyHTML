@@ -128,13 +128,19 @@ const converterConfig = {
     entryPoint: 'index.html'
 };
 
-const Decompressor = Object.freeze({
+const Decompressor = {
     Zip: Symbol('zip'),
     Gzip: Symbol('gz|tgz|tar.gz'),
-});
+};
+
+const Magic = {
+    Zip: new Uint8Array([0x50, 0x4B, 0x03, 0x04]),
+    Gzip: new Uint8Array([0x1F, 0x8B, 0x08]),
+};
+const MAX_MAGIC_LENGTH = 40;
 
 // Make it unmodifiable.
-modifyLock(converterConfig);
+modifyLock(converterConfig, Decompressor, Magic);
 
 // Logger setup
 const logger = winston.createLogger({
@@ -377,6 +383,7 @@ async function resolveLandingPage(providedPath) {
             return await downloadProject(providedPath);
         }
 
+
         const functions = {
             [Decompressor.Zip]: unzipProject,
             [Decompressor.Gzip]: unGzipProject
@@ -408,7 +415,12 @@ async function resolveLandingPage(providedPath) {
         // basename
         const ext =
             Object.keys(associations).find(ex => base.lastIndexOf(ex) !== -1);
-        const selector = associations[ext];
+        let selector = associations[ext];
+
+        if (isNotDefined(selector)) {
+            selector = await tryDecodeFromMagic(providedPath, functions);
+        }
+
         if (selector) {
             const dir = await selector(providedPath, ext);
             if (isNotDefined(dir)) {
@@ -426,6 +438,40 @@ async function resolveLandingPage(providedPath) {
 
     console.error('Unable to resolve provided path:', providedPath);
     process.exit(1);
+}
+
+async function tryDecodeFromMagic(providedPath, lookup) {
+    const [size, filePiece] = await readFile(providedPath, MAX_MAGIC_LENGTH);
+    for (const type of Object.keys(Magic)) {
+        const magic = Magic[type];
+        if (size < magic.length) {
+            continue;
+        }
+        const sameSizedBuf = filePiece.slice(0, magic.length);
+        if (Buffer.from(magic).equals(sameSizedBuf)) {
+            return lookup[Decompressor[type]];
+        }
+    }
+}
+
+async function readFile(filepath, maxLength) {
+    return new Promise(async (resolve, reject) => {
+        fs.open(filepath, 'r', (o_err, fd) => {
+            if (o_err) {
+                reject(err);
+                return;
+            }
+
+            const buffer = new Uint8Array(maxLength);
+            fs.read(fd, buffer, 0, maxLength, 0, (r_err, n_read, buffer) => {
+                if (r_err) {
+                    reject(r_err);
+                    return;
+                }
+                resolve([n_read, buffer]);
+            });
+        });
+    });
 }
 
 function getRootDirectory(file) {
