@@ -1285,8 +1285,12 @@ async function emplaceHTML(pages, resourcePath) {
 function useJSXStyleComments(rawHTML) {
     assert(isDefined(rawHTML) && isString(rawHTML));
 
-    return rawHTML.replace(/<!--([^]*?)-->/gm, '{/*\$1*/}')
-        .replace(/(\/\*[^\/]*?(?<=\*)\/(?!\}))/gm, '{\$1}');
+    /*
+     * Add padding to the new comment in case the
+     * contents of the comment starts with a `/`.
+     */
+    return rawHTML.replace(/<!--([^]*?)-->/gm, '{/* \$1 */}')
+        .replace(/(\/\*[^\/]*?(?<=\*)\/(?!\}))/gm, '{ \$1 }');
 }
 
 async function emplaceImpl(tag, readPath, writePath, replacement) {
@@ -2024,7 +2028,7 @@ function extractStyles(doc) {
 
     allStyles.forEach(style => style.remove());
 
-    return jointStyles;
+    return jointStyles.replace(/<!--([^>]*)-->/gm, '/* $1 */');
 }
 
 function escapeAllJSXQuotes(text) {
@@ -2143,8 +2147,7 @@ function extractAllScripts(doc) {
         logger.info(attrs, mime, src);
 
         const mimeDBEntry = mimeDB[mime];
-        assert(isBehaved(mimeDBEntry));
-        const extension = mimeDBEntry?.extensions?.[0] ?? 'js';
+        const extension   = mimeDBEntry?.extensions?.[0] ?? 'js';
 
         let id = null;
         if (!src) {
@@ -2446,7 +2449,7 @@ function expandMatches(tag, page, matches) {
         const end   = shiftByAttrs(page, start);
 
         if (page[end] === '>' && page[end - 1] === '/')
-            return page;
+            continue;
 
         page = page.substring(0, end) + '/>' + page.substring(end + 1);
     }
