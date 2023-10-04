@@ -23,39 +23,62 @@
  *   DEALINGS IN THE SOFTWARE.
  */
 'use strict';
+import fsExtra from 'fs-extra';
+const {move: moveAll, copy: duplicate} = fsExtra;
+import os from 'node:os';
+import fs from 'node:fs';
+import fsp from 'node:fs/promises';
+import readline from 'node:readline/promises';
+import zlib from 'node:zlib';
+import path from 'node:path';
+import process from 'node:process';
+import {fileURLToPath} from 'node:url';
+import {Transform} from 'node:stream';
+import http from 'node:http';
+import https from 'node:https';
+import jsdom from 'jsdom';
+import {rimraf} from 'rimraf';
+import util from 'util';
+import tar from 'tar';
+import yauzl from 'yauzl';
+import {dirname} from 'path';
+import mimeDB from 'mime-db';
 
-const fsExtra   = require('fs-extra');
-const moveAll   = fsExtra.move;
-const duplicate = fsExtra.copy;
-const os        = require('node:os');
-const fs        = require('node:fs');
-const fsp       = require('node:fs/promises');
-const readline  = require('node:readline/promises');
-const jsdom     = require('jsdom');
-const path      = require('node:path');
-const process   = require('node:process')
-const {rimraf}  = require('rimraf');
-const util      = require('util');
+// Import constants
+import {
+    supportedSchemes,
+    metaTags,
+    linkTags,
+    projectDependencyInjectionTags,
+    selfClosingTags,
+    reactAttributesLookup,
+    modifyLock
+} from './constants.js';
+
+const __dirname    = dirname(fileURLToPath(import.meta.url));
+const sessionID    = randomCounter(8);
+const temporaryDir = path.join(os.tmpdir(), 'ReactifyHTML', sessionID);
 
 // Logger dependencies
-const winston                                       = require('winston');
+import winston from 'winston';
 const {combine, colorize, align, printf, timestamp} = winston.format;
 
 // Assertion dependencies
-const assert = require('assert');
+import assert from 'assert';
 
 const REPL_ID = 'hTmL';
 
 modifyLock(REPL_ID);
 
-const STYLE_TAG  = 'STYLE_CONTENT';
-const APP_TAG    = 'APP_CONTENT';
-const HOOKS_TAG  = 'HOOKS_CONTENT';
-const TITLE_TAG  = 'TITLE_CONTENT';
-const META_TAG   = 'META_CONTENT';
-const LINK_TAG   = 'LINK_CONTENT';
-const PAGE_TAG   = 'PAGE_CONTENT';
-const ROUTES_TAG = 'ROUTES_CONTENT';
+const STYLE_TAG        = 'STYLE_CONTENT';
+const APP_TAG          = 'APP_CONTENT';
+const HOOKS_TAG        = 'HOOKS_CONTENT';
+const TITLE_TAG        = 'TITLE_CONTENT';
+const META_TAG         = 'META_CONTENT';
+const LINK_TAG         = 'LINK_CONTENT';
+const PAGE_TAG         = 'PAGE_CONTENT';
+const ROUTES_TAG       = 'ROUTES_CONTENT';
+const REACT_IMPORT_TAG = 'REACT_IMPORT';
 
 modifyLock(
     REPL_ID, STYLE_TAG, APP_TAG, HOOKS_TAG, TITLE_TAG, META_TAG, LINK_TAG,
@@ -65,6 +88,7 @@ const STYLE_INC_TAG  = 'STYLE_INCLUDE';
 const HOOKS_INC_TAG  = 'HOOKS_INCLUDE';
 const SCRIPT_INC_TAG = 'SCRIPT_INCLUDE';
 const ROUTES_INC_TAG = 'ROUTES_INCLUDE';
+const USE_IMPORT_TAG = 'USE_IMPORT';
 
 modifyLock(STYLE_INC_TAG, HOOKS_INC_TAG, SCRIPT_INC_TAG, ROUTES_INC_TAG);
 
@@ -100,21 +124,27 @@ const converterConfig = {
     searchDepth: -1,
     deduceAssetsPathFromBaseDirectory: true,
     usePathRelativeIndex: true,
-    archive: false
+    archive: false,
+    entryPoint: 'index.html'
 };
 
-const MisMatchPolicy = Object.freeze({
-    Overwrite: Symbol('overwrite'),
-    Merge: Symbol('merge'),
-    Leave: Symbol('leave')
-});
+const Decompressor = {
+    Zip: Symbol('zip'),
+    Gzip: Symbol('gz|tgz|tar.gz'),
+};
+
+const Magic = {
+    Zip: new Uint8Array([0x50, 0x4B, 0x03, 0x04]),
+    Gzip: new Uint8Array([0x1F, 0x8B, 0x08]),
+};
+const MAX_MAGIC_LENGTH = 40;
 
 // Make it unmodifiable.
-modifyLock(converterConfig);
+modifyLock(converterConfig, Decompressor, Magic);
 
 // Logger setup
 const logger = winston.createLogger({
-    level: 'info',
+    level: 'error',
     format: combine(
         timestamp({format: 'YYYY-MM-DD hh:mm:ss.SSS A'}), align(),
         printf((info) => {
@@ -129,29 +159,33 @@ const logger = winston.createLogger({
 const {error, warn, info, verbose, debug, silly} = logger;
 
 logger.info = function() {
-    info(util.format.apply(null, arguments));
+    info(logWrapper(arguments));
 };
 
-logger.error =
-    function() {
-    error(serializeError(arguments[0]));
+logger.error = function() {
+    error(logWrapper(arguments));
+};
+
+function logWrapper() {
+    return util.format.apply(null, arguments);
 }
 
-function serializeError(error) {
-    // Deep copy the string since nodejs doesn't want to
-    // display the error detail as string
-    return deepClone(error.stack);
-}
-
-const mainSourceFile = process.argv[2] ?? 'examples/index.html';
-const mainSourceDir  = path.dirname(mainSourceFile);
+const initialPath =
+    process.argv[2] ?? path.join('examples', converterConfig.entryPoint);
+const mainSourceFile = await resolveLandingPage(initialPath);
+const                        mainSourceDir = getRootDirectory(mainSourceFile);
 
 modifyLock(mainSourceFile, mainSourceDir);
 
 /*
  * Program starting point.
  */
-generateAllPages({href: mainSourceFile, ...parseFile(mainSourceFile), dir: ''});
+generateAllPages({
+    href: mainSourceFile,
+    isLanding: true,
+    ...parseFile(mainSourceFile),
+    dir: ''
+});
 
 async function generateAllPages(landingPage) {
     let allPageMetas = [], allStyles = '', allLinks = [], allScripts = [];
@@ -214,6 +248,7 @@ async function generateAllPages(landingPage) {
 
                 reconstructTree(root);
 
+
                 // FIXME: Scripts can be loaded either via local hooks
                 //  or in the global index page.
                 const scripts    = extractAllScripts(doc);
@@ -233,6 +268,10 @@ async function generateAllPages(landingPage) {
 
                 allStyles = strJoin(allStyles, currentPageStyle, '\n');
 
+                // We have to delay the write of the transformed
+                // html because we need to resolve all pages that
+                // exists so as to replace their hrefs with an
+                // onClick handler.
                 const rawHTML = closeSelfClosingTags(
                     refitTags(dom.window.document.body.innerHTML));
 
@@ -244,6 +283,7 @@ async function generateAllPages(landingPage) {
                 const pageFile =
                     path.join((page?.res?.dir ?? ''), pageName) + '.jsx';
                 const pageInfo = {
+                    pageID: pageID,
                     name: pageName,
                     title: pageTitle,
                     description: pageDescription,
@@ -259,10 +299,9 @@ async function generateAllPages(landingPage) {
                     await emplaceTitle(pageTitle, resourcePath);
                 }
 
-                await             emplaceHTML(rawHTML, pageInfo, resourcePath);
                 useHooks && await addScripts(scripts, pageFile, resourcePath);
 
-                Object.assign(page, {...page, info: pageInfo});
+                Object.assign(page, {...page, html: rawHTML, info: pageInfo});
                 allScripts   = useHooks ?
                       allScripts :
                       uniquefy(allScripts, scripts, 'scriptName');
@@ -277,6 +316,7 @@ async function generateAllPages(landingPage) {
             }
         } catch (err) {
             logger.error(err);
+            throw err;
         }
 
         return pagesStream;
@@ -291,30 +331,343 @@ async function generateAllPages(landingPage) {
 
         logger.info('allPages: ', allPages);
 
+        allPageMetas = uniquefyMetas(allPageMetas);
+
         await emplaceStyle(allStyles, processingParams);
-        const appliedMetas = await emplaceMetas(allPageMetas, processingParams);
-        await                      emplaceLinks(allLinks, processingParams);
+        await emplaceMetas(allPageMetas, processingParams);
+        await emplaceLinks(allLinks, processingParams);
 
         !useHooks && await addScripts(allScripts, null, processingParams);
 
         await emplaceApp(allPages, processingParams);
+
+        await relinkPages(allPages, processingParams);
+
+        await emplaceHTML(allPages, processingParams);
 
         await fixupWebpack(processingParams);
 
         await removeUnusedTags(allPages, processingParams);
 
         await removeTemplates(processingParams);
+
     } catch (err) {
+        console.error('Unable to generate project:', initialPath);
         logger.error(err);
         await cleanOldFiles();
+        await cleanTemporaryFiles();
         process.exit(1);
     }
+
+    await cleanTemporaryFiles();
 
     process.exit(0);
 }
 
-function deepClone(str) {
-    return (' ' + str).slice(1);
+async function resolveLandingPage(providedPath) {
+    try {
+        // Make sure to create temporary directory
+        // if we need it.
+        if (!fs.existsSync(temporaryDir)) {
+            await fsp.mkdir(temporaryDir, {recursive: true});
+        }
+
+        // The provided path is a directory, we can try to find
+        // an index file from the path.
+        if (fs.existsSync(providedPath) &&
+            fs.statSync(providedPath).isDirectory()) {
+            return await resolveLandingPage(await findIndexFile(providedPath));
+        }
+
+        if (isAbsoluteURI(providedPath)) {
+            return await downloadProject(providedPath);
+        }
+
+
+        const functions = {
+            [Decompressor.Zip]: unzipProject,
+            [Decompressor.Gzip]: unGzipProject
+        };
+
+        // Build up an extension lookup for all registered archive file types.
+        const associations =
+            Object.values(Decompressor)
+                .map(
+                    dc => dc.toString()
+                              .replace(/^.+\((.+)\)$/, '$1')
+                              .split('|')
+                              .map(ext => ({[ext]: functions[dc]})))
+                .flat()
+                // Sort the listings by extension length in ascending order
+                // so that longer extension names are matched first.
+                .sort((one, other) => {
+                    const oneLen   = Object.keys(one)[0].length;
+                    const otherLen = Object.keys(other)[0].length;
+                    return otherLen < oneLen ? -1 : oneLen === otherLen ? 0 : 1;
+                })
+                .reduce((acc, cur) => ({...acc, ...cur}), {});
+
+        const {extv2, base} = parseFile(providedPath);
+        if (extv2 === 'html')
+            return providedPath;
+
+        // Match the longest extension name that can be derived from the
+        // basename
+        const ext =
+            Object.keys(associations).find(ex => base.lastIndexOf(ex) !== -1);
+        let selector = associations[ext];
+
+        if (isNotDefined(selector)) {
+            selector = await tryDecodeFromMagic(providedPath, functions);
+        }
+
+        if (selector) {
+            const dir = await selector(providedPath, ext);
+            if (isNotDefined(dir)) {
+                throw new Error(strJoin(
+                    'Could not find', converterConfig.entryPoint,
+                    'file in the provided path', providedPath, ' '));
+            }
+            return dir;
+        }
+    } catch (err) {
+        logger.error(err);
+        console.error(err.message);
+        process.exit(1);
+    }
+
+    console.error('Unable to resolve provided path:', providedPath);
+    process.exit(1);
+}
+
+async function tryDecodeFromMagic(providedPath, lookup) {
+    const [size, filePiece] = await readFile(providedPath, MAX_MAGIC_LENGTH);
+    for (const type of Object.keys(Magic)) {
+        const magic = Magic[type];
+        if (size < magic.length) {
+            continue;
+        }
+        const sameSizedBuf = filePiece.slice(0, magic.length);
+        if (Buffer.from(magic).equals(sameSizedBuf)) {
+            return lookup[Decompressor[type]];
+        }
+    }
+}
+
+async function readFile(filepath, maxLength) {
+    return new Promise(async (resolve, reject) => {
+        fs.open(filepath, 'r', (o_err, fd) => {
+            if (o_err) {
+                reject(err);
+                return;
+            }
+
+            const buffer = new Uint8Array(maxLength);
+            fs.read(fd, buffer, 0, maxLength, 0, (r_err, n_read, buffer) => {
+                if (r_err) {
+                    reject(r_err);
+                    return;
+                }
+                resolve([n_read, buffer]);
+            });
+        });
+    });
+}
+
+function getRootDirectory(file) {
+    return path.dirname(file);
+}
+
+async function unzipProject(providedPath) {
+    return await decompressZipOrGzipImpl(providedPath, Decompressor.Zip);
+}
+
+async function unGzipProject(providedPath) {
+    return await decompressZipOrGzipImpl(providedPath, Decompressor.Gzip);
+}
+
+async function decompressZipOrGzipImpl(archivePath, decompressor) {
+    assert(
+        decompressor === Decompressor.Zip ||
+        decompressor === Decompressor.Gzip);
+
+    const decomps  = Object.values(Decompressor);
+    const rootPath = await[decompressZipImpl, decompressGzipImpl].at(
+        decomps.indexOf(decompressor))(archivePath);
+
+    logger.info('rootPath:', rootPath);
+    let filePath = path.join(temporaryDir, rootPath);
+
+    const info = fs.statSync(filePath);
+    if (info.isDirectory()) {
+        return findIndexFile(filePath);
+    } else {
+        // For nested archives such as .tar.gz
+        // or previously resolved path cyling
+        // back to this point.
+        return await resolveLandingPage(filePath);
+    }
+}
+
+async function decompressGzipImpl(archivePath) {
+    let seenRootDir = false;
+    let rootDir     = '';
+    return new Promise(async (resolve, reject) => {
+        const readStream  = fs.createReadStream(archivePath);
+        const unzipStream = zlib.createGunzip();
+        unzipStream.pipe(tar.extract({
+            cwd: temporaryDir,
+            onentry: (entry) => {
+                [rootDir, seenRootDir] =
+                    checkIfActuallyRoot(rootDir, entry.path);
+            }
+        }));
+
+        readStream.pipe(unzipStream);
+        readStream.on('error', reject);
+        unzipStream.on('error', reject);
+        unzipStream.on('finish', () => resolve(seenRootDir ? rootDir : './'));
+    })
+};
+
+async function decompressZipImpl(archivePath) {
+    let handleCount = 0;
+    let rootDir     = '';
+    let seenRootDir = false;
+    return new Promise((resolve, reject) => {
+        yauzl.open(archivePath, {lazyEntries: true}, async (err, zipfile) => {
+            // track when we've closed all our file handles
+            function incrementHandleCount() {
+                handleCount++;
+            }
+            function decrementHandleCount() {
+                handleCount--;
+                if (handleCount === 0) {
+                    resolve(seenRootDir ? rootDir : './');
+                }
+            }
+
+            incrementHandleCount();
+            zipfile.on('close', function() {
+                decrementHandleCount();
+            });
+
+            zipfile.readEntry();
+            zipfile.on('entry', async (entry) => {
+                const destPath = path.join(temporaryDir, entry.fileName);
+                [rootDir, seenRootDir] =
+                    checkIfActuallyRoot(rootDir, entry.fileName);
+
+                logger.info('Processing:', destPath);
+                if (/\/$/.test(entry.fileName)) {
+                    // directory file names end with '/'
+                    await fsp.mkdir(destPath, {recursive: true});
+                    zipfile.readEntry();
+                } else {
+                    // ensure parent directory exists
+                    if (!fs.existsSync(path.dirname(destPath))) {
+                        await fsp.mkdir(path.dirname(destPath));
+                    }
+                    zipfile.openReadStream(entry, function(err, readStream) {
+                        if (err) {
+                            reject(err);
+                            return;
+                        }
+
+                        const filter      = new Transform();
+                        filter._transform = function(chunk, encoding, cb) {
+                            cb(null, chunk);
+                        };
+                        filter._flush = function(cb) {
+                            cb();
+                            zipfile.readEntry();
+                        };
+
+                        // pump file contents
+                        const writeStream = fs.createWriteStream(destPath);
+                        incrementHandleCount();
+                        writeStream.on('close', decrementHandleCount);
+                        readStream.pipe(filter).pipe(writeStream);
+                    });
+                }
+            });
+        });
+    });
+}
+
+function checkIfActuallyRoot(maybeRootDir, readPath) {
+    if (isEmpty(maybeRootDir)) {
+        maybeRootDir = readPath;
+    }
+
+    if (path.relative(maybeRootDir, readPath).startsWith('..')) {
+        return [maybeRootDir, false];
+    }
+
+    return [maybeRootDir, true];
+}
+
+async function findIndexFile(providedPath) {
+    async function findIndexFileImpl(initialPath) {
+        const directoryQueue    = [];
+        const directoryIterator = await fsp.readdir(initialPath);
+        for (const file of directoryIterator) {
+            const filePath    = path.join(initialPath, file);
+            const stat        = fs.statSync(filePath);
+            const isDirectory = stat.isDirectory(filePath);
+
+            if (file === converterConfig.entryPoint) {
+                return filePath;
+            } else if (isDirectory) {
+                directoryQueue.push(filePath);
+            }
+        }
+        for (const directory of directoryQueue) {
+            const file = await findIndexFileImpl(directory);
+            if (isDefined(file)) {
+                return file;
+            }
+        }
+    }
+
+    const file = await findIndexFileImpl(providedPath);
+
+    return file;
+}
+
+async function downloadProject(url, original) {
+    const {base} = path.parse(original ?? url);
+    const scheme = url.slice(0, url.indexOf('://'));
+    assert(scheme === 'http' || scheme === 'https');
+    const protocol     = [http, https].at(scheme === 'https');
+    const downloadPath = path.join(temporaryDir, base);
+    return new Promise((resolve, reject) => {
+               protocol.get(url, (response) => {
+                   const {statusCode} = response;
+                   if (statusCode === 302) {
+                       resolve({redirectUrl: response.headers.location});
+                       response.resume();
+                       return;
+                   } else if (statusCode !== 200) {
+                       reject(new Error(strJoin(
+                           `Request Failed`, `Status Code: ${statusCode}`,
+                           '\n')));
+                       response.resume();
+                       return;
+                   }
+
+                   const stream = fs.createWriteStream(downloadPath);
+                   response.pipe(stream);
+                   stream.on('finish', () => {
+                       stream.close();
+                       resolve({path: downloadPath});
+                   });
+               });
+           })
+        .then(
+            (next) => next.redirectUrl ?
+                downloadProject(next.redirectUrl, url) :
+                resolveLandingPage(next.path));
 }
 
 async function removeTemplates(resourcePath) {
@@ -351,22 +704,23 @@ async function removeUnusedTags(pages, resourcePath) {
         await emplaceImpl(STYLE_INC_TAG, pageFullPath, pageFullPath, '');
         await emplaceImpl(HOOKS_TAG, pageFullPath, pageFullPath, '');
         await emplaceImpl(HOOKS_INC_TAG, pageFullPath, pageFullPath, '');
+        await emplaceImpl(REACT_IMPORT_TAG, pageFullPath, pageFullPath, '');
+        await emplaceImpl(USE_IMPORT_TAG, pageFullPath, pageFullPath, '');
     }
 
     await emplaceImpl(SCRIPT_INC_TAG, rootB, rootB, '');
     await emplaceImpl(ROOT_ATTR_TAG, rootB, rootB, ' lang="en"');
     await emplaceImpl(ENV_PRE_TAG, webpackB, webpackB, '');
 
-    const favicon        = linkTags.filter(link => link.rel === 'icon')[0];
-    const publicBaseName = path.basename(publicB);
-    const faviconTemplate =
-        buildPathTemplateFrom(path.join(publicBaseName, favicon.href));
+    const favicon         = linkTags.filter(link => link.rel === 'icon')[0];
+    const publicBaseName  = path.basename(publicB);
+    const faviconTemplate = useOSIndependentPath(
+        buildPathTemplateFrom(path.join(publicBaseName, favicon.href)));
 
     await emplaceImpl(FAVICON_DIR_TAG, webpackB, webpackB, faviconTemplate);
 
-
     const indexer        = await getIndexer();
-    const assetIsPresent = isNotEmpty(Object.keys(indexer.saved));
+    const assetIsPresent = fs.existsSync(path.join(publicB, ASSETS_DIR));
     await emplaceImpl(
         ASSETS_PRESENT_TAG, webpackB, webpackB,
         assetIsPresent ? 'true' : 'false');
@@ -435,15 +789,19 @@ async function emplaceInRoot(scripts, resourcePath) {
             .reduce(
                 (acc, script) => {
                     if (!script.isInline) {
-                        const attrs = refitTags(joinAttrs(
-                            getAttributesRaw(script.script),
-                            {src: script.scriptName}));
-                        return acc + `<script ${attrs}></script>` +
+                        const attrs = getAttributesRaw(script.script);
+                        Object.assign(
+                            attrs, {[augment('type')]: script.mime, ...attrs});
+                        const jAttrs = refitTags(joinAttrs(
+                            attrs,
+                            {src: useOSIndependentPath(script.scriptName)}));
+                        return acc + `<script ${jAttrs}></script>` +
                             '\n\t';
                     } else {
                         return acc + '<script src="' +
-                            path.join(script.shortPath, script.scriptName) +
-                            '" type="' + script.mime + '"></script>\n\t';
+                            useOSIndependentPath(path.join(
+                                script.shortPath, script.scriptName)) +
+                            '" type="' + script.mime + '" defer></script>\n\t';
                     }
                 },
                 '\n\t')
@@ -458,14 +816,21 @@ async function emplaceInRoot(scripts, resourcePath) {
 
 function deriveNameFrom(filePath) {
     const {ext} = path.parse(filePath);
-    const name  = filePath.slice(0, -ext.length);
-    const page  = Array.from(name.matchAll(/([a-zA-Z]+)/g))
-                     .reduce((acc, m) => acc + capitalize(m[1]), '')
-                     .concat('Page');
-    return page;
+    const name =
+        filePath.slice(0, isEmpty(ext) ? filePath.length : -ext.length);
+    let page = Array.from(name.matchAll(/([a-zA-Z0-9_]+)/g))
+                   .reduce((acc, m) => acc + capitalize(m[1]), '');
+    if (!page.endsWith('Page')) {
+        page = page.concat('Page');
+    }
+
+    return page.match(/^[0-9]/) ? 'A_' + page : page;
 }
 
 function capitalize(str) {
+    if (isEmpty(str)) {
+        return str;
+    }
     return str[0].toUpperCase() + str.slice(1).toLowerCase();
 }
 
@@ -480,6 +845,52 @@ function strJoin() {
         '');
 
     return single;
+}
+
+function uniquefyMetas(metas) {
+    const metaValues =
+        metas
+            .map((meta, idx) => ({
+                     search:
+                         Object.values(meta).map(v => v.toLowerCase()).sort(),
+                     recovery: idx
+                 }))
+            .sort((one, other) => {
+                const isLess    = one.search < other.search;
+                const isGreater = one.search > other.search;
+                return isLess ? -1 : isGreater ? 1 : 0;
+            });
+
+    const uniqueValues = [];
+    let   active       = metaValues[0];
+    for (let i = 1; i < metaValues.length; ++i) {
+        const other = metaValues[i];
+        if (!isSuperSetOf(other.search, active.search)) {
+            uniqueValues.push(active);
+        }
+        active = other;
+    }
+
+    if (isNotEmpty(uniqueValues))
+        uniqueValues.push(active);
+
+    return uniqueValues.map(v => metas[v.recovery]);
+}
+
+// Requires arguments to be sorted.
+function isSuperSetOf(standard, given) {
+    const minLen = Math.min(standard.length, given.length);
+    const sMin   = standard.slice(0, minLen);
+    const gMin   = given.slice(0, minLen);
+    if (minLen !== given.length)
+        return false;
+
+    for (let i = 0; i < minLen; ++i) {
+        if (sMin[i] !== gMin[i])
+            return false;
+    }
+
+    return true;
 }
 
 function uniquefyPages(newPages, allPages, mainDir) {
@@ -554,12 +965,12 @@ async function emplaceHooks(scripts, pagePath, resourcePath) {
     assert(isDefined(pageB));
     assert(isDefined(srcB));
 
-    const scriptsList = scripts.reduce(
+    const scriptsList = useOSIndependentPath(scripts.reduce(
         (acc, script) => acc + '\'' + script.scriptName + '\'' +
             ',\n\t',
-        '\n\t');
+        '\n\t'));
     const hooksPath   = path.join(srcB, 'hooks/useScript');
-    const relHookIncl = path.relative(pageB, srcB);
+    const relHookIncl = useOSIndependentPath(path.relative(pageB, srcB));
     const hook =
         `\n\tconst [loadedScripts, error] = useScript([${scriptsList}]);`;
     const include = `\nimport useScript from './${relHookIncl}';`;
@@ -631,7 +1042,7 @@ async function emplaceLinksOrMetasImpl(linksOrMetas, isLink, resourcePath) {
     const stringLinksOrMetas =
         finalList
             .map(current => {
-                const joint = joinAttrs(current);
+                const joint = useOSIndependentPath(joinAttrs(current));
                 return tag + joint + '/>';
             })
             .reduce((cur, linkOrMeta) => cur + linkOrMeta + '\n', '\n');
@@ -683,15 +1094,24 @@ async function updateFaviconAddress(newFavicon, oldFavicon, resourcePath) {
     assert(isDefined(publicB));
     assert(isDefined(webpackB));
 
+    if (path.extname(oldFavicon.href) !== path.extname(newFavicon.href)) {
+        const oldExt = path.extname(oldFavicon.href);
+        const newExt = path.extname(newFavicon.href);
+        Object.assign(newFavicon, {
+            ...newFavicon,
+            href: newFavicon.href.slice(0, -newExt.length).concat(oldExt)
+        });
+    }
+
     const oldFaviconFile = path.join(publicB, oldFavicon.href);
     const newFaviconFile = path.join(publicB, newFavicon.href);
-
     try {
-        if (fs.existsSync(newFaviconFile)) {
-            assert(fs.existsSync(oldFaviconFile));
-            await removePath(oldFaviconFile);
+        if (fs.existsSync(oldFaviconFile)) {
+            await fsp.copyFile(oldFaviconFile, newFaviconFile);
+            const publicBaseName = path.basename(publicB);
 
-            const newFaviconTemplate = buildPathTemplateFrom(newFavicon.href);
+            const newFaviconTemplate = buildPathTemplateFrom(
+                path.join(publicBaseName, newFavicon.href));
             await emplaceImpl(
                 FAVICON_DIR_TAG, webpackB, webpackB, newFaviconTemplate);
         }
@@ -755,6 +1175,109 @@ function bt(dir) {
 
     return path.join(dir, '..');
 }
+
+async function relinkPages(pages, resourcePath) {
+    const {pageB} = resourcePath;
+    assert(isDefined(pageB));
+
+    // create a lookup of all page and its corresponding
+    // route.
+    const routeMap = new Map();
+    pages.forEach(
+        page => routeMap.set(
+            page.isLanding      ? page.info.pageID :
+                page.isImplicit ? page.dir :
+                                  page.realpath,
+            page.route));
+
+    const re = new RegExp(
+        '<a[^]+?href[^=]*=[^`\'"]*((?:"[^"\\\\]*' +
+            '(?:\\\\.[^"\\\\]*)*"|\'[^\'\\\\]*(?:\\\\.' +
+            '[^\'\\\\]*)*\'|`[^`\\\\]*(?:\\\\.[^`\\\\]*)*`))',
+        'gm');
+
+    const empty_re = new RegExp('<a[^]+?href[^=]*=(""|\'\'|``)', 'gm');
+    for (const page of pages) {
+        const {html} = page;
+        assert(html);
+
+        /*
+         * Anchor attributes of the form href="" resolve to homepage.
+         * We have to prevent default on this kind of links to prevent
+         * the page from reloading.
+         */
+        const allEmptyLinks =
+            Array.from(html.matchAll(empty_re)).sort(sortIndexDesc);
+
+        Object.assign(
+            page, {...page, html: fixEmptyLinks(html, page, allEmptyLinks)});
+
+        const allLinks = Array.from(page.html.matchAll(re))
+                             .sort(sortIndexDesc)
+                             .map(m => {
+                                 m[1] = path.normalize(
+                                     removeRelativeHyperlinks(unQuote(m[1])));
+                                 return m;
+                             })
+                             .filter(m => routeMap.get(m[1]));
+
+        Object.assign(page, {
+            ...page,
+            html: fixAnchorRoutes(page.html, page, allLinks, routeMap)
+        });
+
+        if (isEmpty(allLinks)) {
+            continue;
+        }
+
+        const pageFullPath = path.join(pageB, page.info.path);
+        const importDecl   = strJoin(
+              `import { useNavigate } from "react-router-dom";`,
+              `@{${REACT_IMPORT_TAG}}`, '\n');
+        const navDecl = `\nconst navigate = useNavigate();`;
+        const navFun  = strJoin(
+             `const navigateTo = (event, page) => {`, `event.preventDefault();`,
+             `navigate(page);`, `}`, '\t\n');
+        const useImportDecl =
+            strJoin(navDecl, navFun, `@{${USE_IMPORT_TAG}}`, '\n');
+
+        await emplaceImpl(
+            REACT_IMPORT_TAG, pageFullPath, pageFullPath, importDecl);
+        await emplaceImpl(
+            USE_IMPORT_TAG, pageFullPath, pageFullPath, useImportDecl);
+    }
+}
+
+function fixAnchorRoutes(html, page, matches, routeMap) {
+    const hKey = 'href=';
+    for (const match of matches) {
+        const ihref = html.slice(match.index).indexOf(hKey);
+        const start = match.index + ihref + hKey.length;
+        const end   = match.index + match[0].length;
+        const route = routeMap.get(match[1]);
+        const repl =
+            `"javascript:void(0);" onClick={(e) => navigateTo(e, '${route}')}`;
+
+        html = html.substring(0, start) + repl + html.substring(end);
+    }
+
+    return html;
+}
+
+function fixEmptyLinks(html, page, matches) {
+    for (const match of matches) {
+        const start =
+            match.index + match[0].length - 2 /* Subtract the empty quote */;
+        const end = match.index + match[0].length;
+        const repl =
+            '"javascript:void(0);" onClick={(e) => e.preventDefault()}';
+
+        html = html.substring(0, start) + repl + html.substring(end);
+    }
+
+    return html;
+}
+
 /*
  * Setup navigation for the pages.
  */
@@ -766,25 +1289,21 @@ async function emplaceApp(pages, resourcePath) {
     let allPageCases = '';
     let allRoutes    = '';
     let routesIncl   = '';
-    let pageCount    = 0;
     for (const page of pages) {
         const {name, title, description} = page.info;
-        const realname =
-            page.info.path.slice(0, -path.extname(page.info.path).length);
-        const pageUrl =
-            pageCount == 0 ? '/' : path.normalize('/' + realname.toLowerCase());
-        allPageCases = strJoin(
-            allPageCases, `case '${pageUrl}':\n`, `\ttitle = '${title}';\n`,
+        const [pageUrl, realname]        = getPageRoute(page);
+        allPageCases                     = strJoin(
+                                allPageCases, `case '${pageUrl}':\n`, `\ttitle = '${title}';\n`,
             `\tmetaDescription = '${description}';\n`, `\tbreak;\n`, '\t');
         allRoutes = strJoin(
             allRoutes, `<Route`, `path="${pageUrl}"`,
             `element={<${name} />} />\n\t\t`, ' ');
 
-        const pageIncl = path.join('pages', realname);
+        const pageIncl = strJoin('.', 'pages', realname, '/');
 
-        routesIncl = routesIncl + `\nimport ${name} from './${pageIncl}';`;
+        routesIncl = routesIncl + `\nimport ${name} from '${pageIncl}';`;
 
-        ++pageCount;
+        Object.assign(page, {...page, route: pageUrl});
     }
 
     await emplaceImpl(PAGE_INFO_TAG, appB, appB, allPageCases.trimRight());
@@ -792,25 +1311,39 @@ async function emplaceApp(pages, resourcePath) {
     await emplaceImpl(ROUTES_INC_TAG, appB, appB, routesIncl.trimRight());
 }
 
-async function emplaceHTML(rawHTML, pageInfo, resourcePath) {
+function getPageRoute(page) {
+    const realname =
+        page.info.path.slice(0, -path.extname(page.info.path).length);
+    const pageUrl = page.isLanding ?
+        '/' :
+        useOSIndependentPath(path.normalize('/' + realname.toLowerCase()));
+
+    return [pageUrl, realname];
+}
+
+async function emplaceHTML(pages, resourcePath) {
     const {pageB} = resourcePath;
     assert(isDefined(pageB));
 
-    const refPageName     = 'page-base.jsx';
-    const refPageFullPath = path.join(pageB, refPageName);
-    const newPageFullPath = path.join(pageB, pageInfo.path);
+    for (const page of pages) {
+        const {info, html} = page;
+        const pageFullPath = path.join(pageB, info.path);
 
-    await emplaceImpl(
-        PAGE_TAG, refPageFullPath, newPageFullPath,
-        useJSXStyleComments(rawHTML));
-    await emplaceImpl(
-        PAGE_NAME_TAG, newPageFullPath, newPageFullPath, pageInfo.name);
+        await emplaceImpl(
+            PAGE_TAG, pageFullPath, pageFullPath, useJSXStyleComments(html));
+        await emplaceImpl(PAGE_NAME_TAG, pageFullPath, pageFullPath, info.name);
+    }
 }
 
 function useJSXStyleComments(rawHTML) {
     assert(isDefined(rawHTML) && isString(rawHTML));
 
-    return rawHTML.replace(/<!--((?:.|\n|\r)*?)-->/gm, '{/*\$1*/}');
+    /*
+     * Add padding to the new comment in case the
+     * contents of the comment starts with a `/`.
+     */
+    return rawHTML.replace(/<!--([^]*?)-->/gm, '{/* \$1 */}')
+        .replace(/(\/\*[^\/]*?(?<=\*)\/(?!\}))/gm, '{ \$1 }');
 }
 
 async function emplaceImpl(tag, readPath, writePath, replacement) {
@@ -863,7 +1396,7 @@ async function updateLinksFromLinksContent(
             await fsp.writeFile(linkFullPath, updatedContent);
 
         } catch (err) {
-            console.error(err);
+            logger.error(err);
         };
     }
 
@@ -872,7 +1405,7 @@ async function updateLinksFromLinksContent(
 
 async function updateStyleLinks(doc, pageSourceFile, resourcePath, style) {
     const fixables = Array.from(style.matchAll(/url\s*\(([^\)]+)\)/gm))
-                         .sort((one, other) => other.index - one.index)
+                         .sort(sortIndexDesc)
                          .filter(link => {
                              return !isAbsoluteURI(unQuote(link[1]));
                          });
@@ -901,9 +1434,10 @@ async function updateStyleLinks(doc, pageSourceFile, resourcePath, style) {
 
         const finalDir       = generateAssetsFinalDirectory(link);
         const assetsRealPath = path.join(ASSETS_DIR, finalDir);
-        const assetFile = path.join(assetsRealPath, path.basename(link.value));
-        const recInfo   = fixables[link.recovery];
-        style = style.substring(0, recInfo.index) + `url("${assetFile}")` +
+        const assetFile      = useOSIndependentPath(
+                 path.join(assetsRealPath, path.basename(link.value)));
+        const recInfo = fixables[link.recovery];
+        style = style.substring(0, recInfo.index) + `url("/${assetFile}")` +
             style.substring(recInfo.index + recInfo[0].length);
     }
 
@@ -932,7 +1466,6 @@ async function updateMissingLinks(doc, pageSourceFile, resourcePath) {
     if (isEmpty(modifiables))
         return;
 
-
     const     resolvedAssetsPath =
         await retrieveAssetsFromGlobalDirectory(pageSourceFile, modifiables);
 
@@ -945,7 +1478,7 @@ async function updateMissingLinks(doc, pageSourceFile, resourcePath) {
         if (isNotBehaved(repl))
             continue;
 
-        const augmentedPath = path.join(ASSETS_DIR, finalDir, repl.base);
+        const augmentedPath = '/' + path.join(ASSETS_DIR, finalDir, repl.base);
         if (asset.isHTMLElement) {
             // All attributes have been augmented at this point
             // changing it requires a change in the augmented version
@@ -1000,7 +1533,10 @@ function generateAssetsFinalDirectory(assetBundle) {
 
     const {usePathRelativeIndex} = converterConfig;
     const asset                  = parseFile(assetBundle.value);
-    const assetDir               = removeBackLinks(path.normalize(asset.dir));
+    let   assetDir               = removeBackLinks(path.normalize(asset.dir));
+
+    if (assetDir.startsWith(ASSETS_DIR))
+        assetDir = assetDir.slice(ASSETS_DIR.length);
 
     assert(isBoolean(usePathRelativeIndex));
 
@@ -1015,6 +1551,10 @@ function generateAssetsFinalDirectory(assetBundle) {
     }
 
     return assetDir;
+}
+
+function useOSIndependentPath(p) {
+    return p.replace(new RegExp(`\\${path.sep}`, 'g'), '/');
 }
 
 /*\
@@ -1035,13 +1575,13 @@ async function retrieveAssetsFromGlobalDirectory(pageSourceFile, assetsList) {
     const [globalAssetsPath, directoryIDX] =
         await resolveGlobalAssetsPath(pageSourceFile, indexer.re);
 
-    indexer.update({...indexer, path: globalAssetsPath});
+    indexer.update(
+        {...indexer, saved: globalAssetsPath, path: globalAssetsPath});
 
     if (isEmpty(Object.keys(directoryIDX))) {
         return requestedAssetsResolvedPath;
     }
 
-    const continueKey = 'x';
     for (const assetBundle of assetsList) {
         const asset                                      = assetBundle.value;
         const assetInfo                                  = parseFile(asset);
@@ -1125,7 +1665,7 @@ async function resolveGlobalAssetsPath(pageSourceFile, excludePattern) {
             } else
                 throw 'Error: Invalid path provided';
         } catch (err) {
-            console.error(err);
+            logger.error(err);
             return ['', requestedAssetsResolvedPath];
         }
     } else {
@@ -1262,9 +1802,6 @@ async function prompt(question) {
     return await rl.question(question);
 }
 
-var rl =
-    readline.createInterface({input: process.stdin, output: process.stdout});
-
 function parseFile(file) {
     const versionPos = file.indexOf('?');
     const realPath =
@@ -1286,7 +1823,7 @@ function buildAssetLookup() {
     if (buildAssetLookup.assetDirLookup)
         return buildAssetLookup.assetDirLookup;
 
-    const mimeDatabase = mimeDB();
+    const mimeDatabase = mimeDB;
     const assetDirLookup =
         Object.keys(mimeDatabase)
             .filter((mimeKey) => mimeDatabase[mimeKey].extensions)
@@ -1296,12 +1833,6 @@ function buildAssetLookup() {
             .reduce((acc, cur) => ({...acc, ...cur.shift()}), {});
 
     return buildAssetLookup.assetDirLookup = assetDirLookup;
-}
-
-function mimeDB() {
-    if (mimeDB.mimeDB)
-        return mimeDB.mimeDB;
-    return mimeDB.mimeDB = require('mime-db');
 }
 
 function isVersioned(file) {
@@ -1399,6 +1930,13 @@ async function cleanOldFiles() {
     }
 }
 
+async function cleanTemporaryFiles() {
+    try {
+        await deleteDirectory(temporaryDir);
+    } catch (err) {
+    }
+}
+
 async function removePath(path) {
     const fileInfo = fs.statSync(path);
     if (fileInfo.isFile())
@@ -1448,10 +1986,9 @@ function extractPropsImpl(doc, referencePath, selector) {
 async function extractAllPageLinks(doc, pageSourceFile, resourcePath) {
     const links =
         Array.from(doc.querySelectorAll('a[href]'))
-            .map(element => ({
-                     element: element,
-                     href: path.normalize(getAttributesRaw(element).href)
-                 }))
+            .map(
+                element =>
+                    ({href: path.normalize(getAttributesRaw(element).href)}))
             .reduce(
                 (acc, link) => !acc.find(l => l.href == link.href) ?
                     acc.concat([link]) :
@@ -1463,10 +2000,15 @@ async function extractAllPageLinks(doc, pageSourceFile, resourcePath) {
                     !isSelfReference(mainSourceFile, link.href))
             // Match <a href='next/'></a>
             .map(link => {
+                // Implicit references such as: /docs/api
+                // refers to the index.html file found
+                // in that directory relative to the root
+                // i.e /docs/api/index.html
                 const isImplicit = lastEntry(link.href) === '/' ||
                     isEmpty(path.parse(link.href).ext);
                 return isImplicit ? {
                     ...link,
+                    isImplicit: true,
                     href: removeRelativeHyperlinks(
                         path.normalize(link.href + '/index.html'))
                 } :
@@ -1539,26 +2081,99 @@ function extractStyles(doc) {
 
     allStyles.forEach(style => style.remove());
 
-    return jointStyles;
+    return jointStyles.replace(/<!--([^>]*)-->/gm, '/* $1 */');
 }
 
 function escapeAllJSXQuotes(text) {
-    const matches =
-        Array.from(text.matchAll(/>((?:[^<>]*?(?:\{|\})[^<>]*?)+)</gm))
-            .sort((one, other) => other.index - one.index);
+    let   escapedText = '';
+    let   idx         = 0;
+    const comments    = [
+        extractComments(text, '/*', '*/'), extractComments(text, '<!--', '-->')
+    ].flat();
 
+    while (idx !== -1) {
+        const [start, end] = matchClosely(idx, text, '>', '<');
+        if (start === -1 || end === -1)
+            break;
+
+        const stripped =
+            escapeJSXQuotesIn(text.slice(start, end + 1), start, comments);
+        escapedText += text.slice(idx, start) + stripped;
+
+        idx = end + 1;
+    }
+
+    if (idx !== -1)
+        escapedText += text.slice(idx);
+
+    return escapedText;
+}
+
+function escapeJSXQuotesIn(text, off, comments) {
+    const matches = Array.from(text.matchAll(/(\{|\})/g)).sort(sortIndexDesc);
     for (const match of matches) {
-        const start = match.index + 1;                    // includes `>`
-        const end   = match.index + match[0].length - 1;  // includes `<`
-        const repl  = match[1].replace(/(\{|\})/g, `{'$1'}`);
+        const index = off + match.index;
+        if (isInComment(text, index, comments))
+            continue;
 
-        assert(text[start - 1] === '>');
-        assert(text[end] === '<');
-
-        text = text.substring(0, start) + repl + text.substring(end);
+        text = text.substring(0, match.index) + '{\'' + match[1] + '\'}' +
+            text.substring(match.index + match[0].length);
     }
 
     return text;
+}
+
+function nextOf(from, haystack, needle) {
+    const idx = haystack.slice(from).indexOf(needle);
+    return idx === -1 ? idx : from + idx;
+}
+
+function isInComment(text, pos, comments) {
+    return comments.find(comment => pos >= comment.start && pos <= comment.end);
+}
+
+function matchClosely(pos, context, sDelim, eDelim) {
+    let spos = -1, epos = -1;
+    do {
+        const start = nextOf(pos, context, sDelim);
+        if (start === -1)
+            break;
+        const end = nextOf(start, context, eDelim);
+        if (end === -1)
+            break;
+        const nextsDelim = nextOf(start + 1, context, sDelim);
+        spos             = start;
+        epos             = end;
+        if (nextsDelim < end) {
+            pos = start + 1;
+        } else {
+            break;
+        }
+    } while (true);
+
+    return [spos, epos];
+}
+
+function extractComments(context, sDelim, eDelim) {
+    const comments = [];
+    let   idx      = 0;
+    while (idx !== -1) {
+        const start = nextOf(idx, context, sDelim);
+        if (start === -1)
+            break;
+        const end = nextOf(start, context, eDelim);
+        if (end === -1)
+            break;
+        comments.push({
+            start: start,
+            end: end,
+            shift: Math.min(sDelim.length, eDelim.length)
+        });
+
+        idx = end + eDelim.length;
+    }
+
+    return comments;
 }
 
 function extractAllScripts(doc) {
@@ -1584,9 +2199,8 @@ function extractAllScripts(doc) {
         let   src  = attrs[SRC];
         logger.info(attrs, mime, src);
 
-        const mimeDBEntry = mimeDB()[mime];
-        assert(isBehaved(mimeDBEntry));
-        const extension = mimeDBEntry?.extensions?.[0] ?? 'js';
+        const mimeDBEntry = mimeDB[mime];
+        const extension   = mimeDBEntry?.extensions?.[0] ?? 'js';
 
         let id = null;
         if (!src) {
@@ -1624,6 +2238,9 @@ function adaptToHTML(doc, element) {
     return externalResolver;
 }
 
+/*
+ * NB! Generator gives a maximum of 10 digits.
+ */
 function randomCounter(nDigits) {
     return Math.floor((Math.random() + .001) * 0xdeadbeef)
         .toString(nDigits)
@@ -1652,12 +2269,23 @@ function reconstructTree(node) {
 
 function modifyAttributes(node, attributes) {
     Object.keys(attributes).forEach(attr => {
-        attr = attr.toLowerCase();
+        const provided = attr;
+        attr           = attr.toLowerCase();
         let ns;
+        /*\
+         * Values of some attributes start with quotes
+         * hence, they have to be escaped with '{' '}'
+         * remove, this types of quote and replace
+         * with alternating quotations.
+         * e.g data-json={"key": "value"} is replaced this:
+         *  data-json='"key": "value"'.
+        \*/
+        modifyEscapeIntent(node, provided, attributes);
         if ((ns = isNamespaced(attr))) {
             const modTag    = ns[1] + ns[2][0].toUpperCase() + ns[2].slice(1);
-            const attrValue = node.getAttribute(attr);
+            const attrValue = attributes[attr];
             node.setAttributeNS(null, modTag, attrValue);
+            node.removeAttribute(attr);
         } else if (reactAttributesLookup[attr]) {
             const selection = reactAttributesLookup[attr];
             switch (selection.type) {
@@ -1679,18 +2307,38 @@ function modifyAttributes(node, attributes) {
                 }
             }
             node.removeAttribute(attr);
-
-            return;
         }
     });
 }
 
 function isNamespaced(attribute) {
-    return attribute.match(/^([a-z-]+):([a-z-]+)$/);
+    return !!attribute.match(/^([a-z-]+):([a-z-]+)$/);
 }
 
 function augment(attr) {
     return REPL_ID + attr;
+}
+
+function modifyEscapeIntent(node, attribute, attributes) {
+    const value = attributes[attribute];
+    if (value.startsWith('{') && value[1] !== '{' && lastEntry(value) === '}') {
+        const mod = '`' + value + '`';
+        node.removeAttribute(attribute);
+        node.setAttribute(attribute, mod);
+        Object.assign(attributes, {...attributes, [attribute]: mod});
+    }
+}
+
+function getAttributesRaw(node) {
+    const attributeNodeArray = Array.prototype.slice.call(node.attributes);
+    return attributeNodeArray.reduce(
+        (attrs, attribute) => ({
+            ...attrs,
+            [attribute.name.indexOf(REPL_ID) != -1 ?
+                 attribute.name.substr(REPL_ID.length) :
+                 attribute.name]: attribute.value
+        }),
+        {});
 }
 
 function getAttributes(node) {
@@ -1706,18 +2354,6 @@ function getAttributes(node) {
     }, {});
 }
 
-function getAttributesRaw(node) {
-    const attributeNodeArray = Array.prototype.slice.call(node.attributes);
-    return attributeNodeArray.reduce(
-        (attrs, attribute) => ({
-            ...attrs,
-            [attribute.name.indexOf(REPL_ID) != -1 ?
-                 attribute.name.substr(REPL_ID.length) :
-                 attribute.name]: attribute.value
-        }),
-        {});
-}
-
 // Format inline-styles as JSX style {{}}
 function formatStyle(value) {
     const formattedStyle = {};
@@ -1725,17 +2361,22 @@ function formatStyle(value) {
     const allStyles =
         stylist
             .map(style => {
-                const div   = style.split(':').map(p => p.trim());
-                const one   = div[0];
-                const other = div[1];
+                const div           = style.indexOf(':');
+                const one           = style.slice(0, div).trim().toLowerCase();
+                const other         = style.slice(div + 1).trim();
+                const isUserDefined = one.startsWith('--');
                 if (isEmpty(one) || isEmpty(other))
                     return '';
                 const oneMatches = Array.from(one.matchAll(/-([a-z])/gm));
-                if (isEmpty(oneMatches))
+                if (isEmpty(oneMatches) || isUserDefined) {
+                    if (isUserDefined)
+                        return `'${one}': \`${other}\``;
                     return `${one}: \`${other}\``;
+                }
 
                 const jointOne = oneMatches.reduce((acc, m, i) => {
-                    const section = m.input.substring(acc.start, m.index) +
+                    const section =
+                        m.input.substring(acc.start, m.index).toLowerCase() +
                         m[1].toUpperCase();
                     acc.start = m.index + m[0].length;
                     return {...acc, str: acc.str + section};
@@ -1750,10 +2391,8 @@ function formatStyle(value) {
     return `{{${allStyles.join(', ')}}}`;
 }
 
-function modifyLock() {
-    for (const arg of arguments) {
-        Object.freeze(arg);
-    }
+function sortIndexDesc(one, other) {
+    return other.index - one.index;
 }
 
 function isArray(any) {
@@ -1820,6 +2459,10 @@ function isURI(link) {
     try {
         const idx = link.indexOf('://');
         if (idx === -1) {
+            // Make a windows compatibility check
+            if (isWindowsPath(link))
+                return false;
+
             new URL(link);
             return true;
         } else {
@@ -1829,6 +2472,10 @@ function isURI(link) {
     } catch (error) {
         return false;
     }
+}
+
+function isWindowsPath(link) {
+    return os.platform() === 'win32' && link.match(/^[a-zA-Z]:\\/);
 }
 
 function lastEntry(list) {
@@ -1845,9 +2492,8 @@ function closeSelfClosingTags(html) {
         // Sort the matches so that the replacement will
         // not have to bother about shifting every other
         // match after replacement of one.
-        const matches = Array.from(html.matchAll(regex))
-                            .sort((one, other) => other.index - one.index);
-        html = expandMatches(tag, html, matches);
+        const matches = Array.from(html.matchAll(regex)).sort(sortIndexDesc);
+        html          = expandMatches(tag, html, matches);
     }
 
     return html;
@@ -1859,7 +2505,7 @@ function expandMatches(tag, page, matches) {
         const end   = shiftByAttrs(page, start);
 
         if (page[end] === '>' && page[end - 1] === '/')
-            return page;
+            continue;
 
         page = page.substring(0, end) + '/>' + page.substring(end + 1);
     }
@@ -1901,159 +2547,135 @@ function shiftByAttrs(page, off) {
     } while (off < pageLen);
 }
 
-var supportedSchemes =
-    ['http', 'https', 'ftp', 'mailto', 'tel', 'data', 'file'];
+function exports() {
+    if (process.env.NODE_ENV === 'test') {
+        return {
+            generateAllPages,
+            resolveLandingPage,
+            tryDecodeFromMagic,
+            readFile,
+            getRootDirectory,
+            unzipProject,
+            unGzipProject,
+            checkIfActuallyRoot,
+            findIndexFile,
+            downloadProject,
+            removeTemplates,
+            removeUnusedTags,
+            buildPathTemplateFrom,
+            addScripts,
+            emplaceInRoot,
+            deriveNameFrom,
+            capitalize,
+            strJoin,
+            uniquefyMetas,
+            isSuperSetOf,
+            uniquefyPages,
+            uniquefy,
+            removeAbsoluteRef,
+            pageIsInStream,
+            joinAttrs,
+            duplicatePageTemplate,
+            emplaceHooks,
+            removeHooks,
+            deleteFilesMatch,
+            emplaceRootAttrs,
+            emplaceLinks,
+            emplaceMetas,
+            overrideSet,
+            updateFaviconAddress,
+            emplaceTitle,
+            emplaceStyle,
+            fixupWebpack,
+            bt,
+            relinkPages,
+            fixAnchorRoutes,
+            fixEmptyLinks,
+            emplaceApp,
+            getPageRoute,
+            emplaceHTML,
+            useJSXStyleComments,
+            emplaceImpl,
+            clip,
+            updateLinksFromLinksContent,
+            updateStyleLinks,
+            unQuote,
+            updateMissingLinks,
+            copyResolvedAssetsToOutputDirectory,
+            generateAssetsFinalDirectory,
+            useOSIndependentPath,
+            removeBackLinks,
+            retrieveAssetsFromGlobalDirectory,
+            filterAssetsByRelativity,
+            removeRelativeHyperlinks,
+            resolveGlobalAssetsPath,
+            indexDirectory,
+            isSelfReference,
+            buildExternalSource,
+            isGeneratedScriptName,
+            sanitizedPrompt,
+            parseFile,
+            buildAssetLookup,
+            isVersioned,
+            initializeProjectStructure,
+            buildPathIgnore,
+            buildRegularExpression,
+            treat,
+            cleanOldFiles,
+            cleanTemporaryFiles,
+            removePath,
+            deleteDirectory,
+            extractDescription,
+            extractTitle,
+            extractLinks,
+            extractMetas,
+            extractAllPageLinks,
+            getIndexer,
+            extractStyles,
+            escapeAllJSXQuotes,
+            escapeJSXQuotesIn,
+            nextOf,
+            isInComment,
+            matchClosely,
+            extractComments,
+            extractAllScripts,
+            adaptToHTML,
+            randomCounter,
+            refitTags,
+            reconstructTree,
+            modifyAttributes,
+            isNamespaced,
+            augment,
+            modifyEscapeIntent,
+            getAttributesRaw,
+            getAttributes,
+            formatStyle,
+            sortIndexDesc,
+            isArray,
+            isString,
+            isBoolean,
+            isNumber,
+            isObject,
+            isRegExp,
+            isNotEmpty,
+            isEmpty,
+            isBehaved,
+            isNotBehaved,
+            isDefined,
+            isNotDefined,
+            isNull,
+            isNotNull,
+            isAbsoluteURI,
+            isWindowsPath,
+            lastEntry,
+            fullPathOf,
+            closeSelfClosingTags,
+            expandMatches,
+            shiftByAttrs,
+        };
+    }
 
-var supportedFonts = ['ttf', 'otf', 'woff', 'woff2', 'eot'];
-
-var metaTags = [
-    {name: 'viewport', content: 'width=device-width, initial-scale='}, {
-        name: 'theme-color',
-        content: '#000000',
-    },
-    {name: 'description', content: 'Web site created using ReactifyHTML'}
-];
-
-var linkTags = [
-    {rel: 'icon', href: 'favicon.ico'},
-    {rel: 'apple-touch-icon', href: 'logo192.png'},
-    {rel: 'manifest', href: 'manifest.json'}
-];
-
-var projectDependencyInjectionTags =
-    ['audio', 'embed', 'iframe', 'img', 'input', 'source', 'track', 'video'];
-
-var selfClosingTags = [
-    'area', 'base', 'br', 'col', 'command', 'embed', 'hr', 'img', 'input',
-    'keygen', 'link', 'meta', 'param', 'source', 'track', 'wbr'
-];
-
-var reactAttributesLookup = {
-    'accept': {react: 'accept', type: 'text'},
-    'accept-charset': {react: 'acceptCharset', type: 'text'},
-    'accesskey': {react: 'accessKey', type: 'text'},
-    'action': {react: 'action', type: 'text'},
-    'allowfullscreen': {react: 'allowFullScreen', type: 'boolean'},
-    'alt': {react: 'alt', type: 'text'},
-    'async': {react: 'async', type: 'boolean'},
-    'autocomplete': {react: 'autoComplete', type: 'text'},
-    'autofocus': {react: 'autoFocus', type: 'boolean'},
-    'autoplay': {react: 'autoPlay', type: 'boolean'},
-    'capture': {react: 'capture', type: 'boolean'},
-    'cellpadding': {react: 'cellPadding', type: 'text'},
-    'cellspacing': {react: 'cellSpacing', type: 'text'},
-    'challenge': {react: 'challenge', type: 'text'},
-    'charset': {react: 'charSet', type: 'text'},
-    'checked': {react: 'checked', type: 'boolean'},
-    'cite': {react: 'cite', type: 'text'},
-    'classid': {react: 'classID', type: 'text'},
-    'class': {react: 'className', type: 'text'},
-    'colspan': {react: 'colSpan', type: 'text'},
-    'cols': {react: 'cols', type: 'number'},
-    'content': {react: 'content', type: 'text'},
-    'contenteditable': {react: 'contentEditable', type: 'boolean'},
-    'contextmenu': {react: 'contextMenu', type: 'text'},
-    'controls': {react: 'controls', type: 'boolean'},
-    'controlslist': {react: 'controlsList', type: 'text'},
-    'coords': {react: 'coords', type: 'text'},
-    'crossorigin': {react: 'crossOrigin', type: 'text'},
-    'data': {react: 'data', type: 'text'},
-    'datetime': {react: 'dateTime', type: 'text'},
-    'default': {react: 'default', type: 'boolean'},
-    'defer': {react: 'defer', type: 'boolean'},
-    'dir': {react: 'dir', type: 'text'},
-    'disabled': {react: 'disabled', type: 'boolean'},
-    'download': {react: 'download', type: 'text'},
-    'draggable': {react: 'draggable', type: 'boolean'},
-    'enctype': {react: 'encType', type: 'text'},
-    'form': {react: 'form', type: 'text'},
-    'formaction': {react: 'formAction', type: 'text'},
-    'formenctype': {react: 'formEncType', type: 'text'},
-    'formmethod': {react: 'formMethod', type: 'text'},
-    'formnovalidate': {react: 'formNoValidate', type: 'boolean'},
-    'formtarget': {react: 'formTarget', type: 'text'},
-    'frameborder': {react: 'frameBorder', type: 'text'},
-    'headers': {react: 'headers', type: 'text'},
-    'height': {react: 'height', type: 'text'},
-    'hidden': {react: 'hidden', type: 'boolean'},
-    'high': {react: 'high', type: 'number'},
-    'href': {react: 'href', type: 'text'},
-    'hreflang': {react: 'hrefLang', type: 'text'},
-    'for': {react: 'htmlFor', type: 'text'},
-    'http-equiv': {react: 'httpEquiv', type: 'text'},
-    'icon': {react: 'icon', type: 'text'},
-    'id': {react: 'id', type: 'text'},
-    'inputmode': {react: 'inputMode', type: 'text'},
-    'integrity': {react: 'integrity', type: 'text'},
-    'is': {react: 'is', type: 'text'},
-    'keyparams': {react: 'keyParams', type: 'text'},
-    'keytype': {react: 'keyType', type: 'text'},
-    'kind': {react: 'kind', type: 'text'},
-    'label': {react: 'label', type: 'text'},
-    'lang': {react: 'lang', type: 'text'},
-    'list': {react: 'list', type: 'text'},
-    'loop': {react: 'loop', type: 'boolean'},
-    'low': {react: 'low', type: 'number'},
-    'manifest': {react: 'manifest', type: 'text'},
-    'marginheight': {react: 'marginHeight', type: 'number'},
-    'marginwidth': {react: 'marginWidth', type: 'number'},
-    'max': {react: 'max', type: 'text'},
-    'maxlength': {react: 'maxLength', type: 'number'},
-    'media': {react: 'media', type: 'text'},
-    'mediagroup': {react: 'mediaGroup', type: 'text'},
-    'method': {react: 'method', type: 'text'},
-    'min': {react: 'min', type: 'text'},
-    'minlength': {react: 'minLength', type: 'number'},
-    'multiple': {react: 'multiple', type: 'boolean'},
-    'muted': {react: 'muted', type: 'boolean'},
-    'name': {react: 'name', type: 'text'},
-    'novalidate': {react: 'noValidate', type: 'boolean'},
-    'nonce': {react: 'nonce', type: 'text'},
-    'open': {react: 'open', type: 'boolean'},
-    'optimum': {react: 'optimum', type: 'number'},
-    'pattern': {react: 'pattern', type: 'text'},
-    'placeholder': {react: 'placeholder', type: 'text'},
-    'poster': {react: 'poster', type: 'text'},
-    'preload': {react: 'preload', type: 'text'},
-    'profile': {react: 'profile', type: 'text'},
-    'radiogroup': {react: 'radioGroup', type: 'text'},
-    'readonly': {react: 'readOnly', type: 'boolean'},
-    'rel': {react: 'rel', type: 'text'},
-    'required': {react: 'required', type: 'boolean'},
-    'reversed': {react: 'reversed', type: 'boolean'},
-    'role': {react: 'role', type: 'text'},
-    'rowspan': {react: 'rowSpan', type: 'number'},
-    'rows': {react: 'rows', type: 'number'},
-    'sandbox': {react: 'sandbox', type: 'text'},
-    'scope': {react: 'scope', type: 'text'},
-    'scoped': {react: 'scoped', type: 'boolean'},
-    'scrolling': {react: 'scrolling', type: 'text'},
-    'seamless': {react: 'seamless', type: 'boolean'},
-    'selected': {react: 'selected', type: 'boolean'},
-    'shape': {react: 'shape', type: 'text'},
-    'size': {react: 'size', type: 'text'},
-    'sizes': {react: 'sizes', type: 'text'},
-    'span': {react: 'span', type: 'number'},
-    'spellcheck': {react: 'spellCheck', type: 'boolean'},
-    'src': {react: 'src', type: 'text'},
-    'srcdoc': {react: 'srcDoc', type: 'text'},
-    'srclang': {react: 'srcLang', type: 'text'},
-    'srcset': {react: 'srcSet', type: 'text'},
-    'start': {react: 'start', type: 'number'},
-    'step': {react: 'step', type: 'text'},
-    'style': {react: 'style', type: 'text'},
-    'summary': {react: 'summary', type: 'text'},
-    'tabindex': {react: 'tabIndex', type: 'number'},
-    'target': {react: 'target', type: 'text'},
-    'title': {react: 'title', type: 'text'},
-    'type': {react: 'type', type: 'text'},
-    'usemap': {react: 'useMap', type: 'text'},
-    'value': {react: 'value', type: 'text'},
-    'width': {react: 'width', type: 'text'},
-    'wmode': {react: 'wmode', type: 'text'},
-    'wrap': {react: 'wrap', type: 'text'}
+    return {};
 };
 
-modifyLock(
-    supportedFonts, metaTags, linkTags, projectDependencyInjectionTags,
-    selfClosingTags, reactAttributesLookup);
+export default exports();

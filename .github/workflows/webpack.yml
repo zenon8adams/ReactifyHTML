@@ -7,41 +7,98 @@ on:
   pull_request:
     branches:
       - master
+    paths-ignore:
+      - '**/README*'
 
 env:
   CI: ""
 
 jobs:
   build:
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.os }}
 
     strategy:
       matrix:
         node-version: [18.x, 20.x]
+        os: [macOS-latest, windows-latest, ubuntu-latest]
 
     steps:
-      - uses: actions/checkout@v2
+      - uses: actions/checkout@v3
 
+      - uses: pnpm/action-setup@v2
+        with:
+          version: 8
+          
       - name: Use Node.js ${{ matrix.node-version }}
-        uses: actions/setup-node@v2
+        uses: actions/setup-node@v3
         with:
           node-version: ${{ matrix.node-version }}
 
-      - name: Install dependencies
-        run: yarn install
+      - name: Install dependencies (Project)
+        run: pnpm install
+
+      - name: Run all tests
+        run: pnpm test
       
-      - name: Generate template
-        uses: gacts/run-and-post-run@v1
-        with:
-          run: node index.js
-          post: |
-              echo "Post motem"
-              cat logs/progress-$(date +'%Y-%m-%d').log
+      - name: Generate template (Index)
+        run: node index.js
 
-      - name: Install Template build dependencies
-        working-directory: build
-        run: yarn install
+      - name: Echo Logs (Index)
+        if: always()
+        run: |
+             echo "Post motem"
+             cat logs/progress-$(date +'%Y-%m-%d').log
 
-      - name: Build CRA
+      - name: Install build dependencies (Index)
         working-directory: build
-        run: yarn run build
+        run: pnpm install
+
+      - name: Format code (Index)
+        working-directory: build
+        run: pnpm run format
+
+      - name: Build CRA (Index)
+        working-directory: build
+        run: pnpm run build
+
+      - name: Generate archive template (Local archive)
+        run: node index.js examples/index.zip
+
+      - name: Echo Logs (Local archive)
+        if: always()
+        run: |
+             echo "Post motem"
+             cat logs/progress-$(date +'%Y-%m-%d').log
+      
+      - name: Install build dependencies (Local archive)
+        working-directory: build
+        run: pnpm install
+
+      - name: Format code (Local archive)
+        working-directory: build
+        run: pnpm run format
+
+      - name: Build CRA (Local archive)
+        working-directory: build
+        run: pnpm run build
+
+      - name: Generate template (Online archive)
+        run: node index.js https://github.com/themewagon/mexant/archive/refs/tags/v1.0.0.zip
+      
+      - name: Echo Logs (Online archive)
+        if: always()
+        run: |
+             echo "Post motem"
+             cat logs/progress-$(date +'%Y-%m-%d').log
+      
+      - name: Install build dependencies (Online archive)
+        working-directory: build
+        run: pnpm install
+
+      - name: Format code (Online archive)
+        working-directory: build
+        run: pnpm run format
+
+      - name: Build CRA (Online archive)
+        working-directory: build
+        run: pnpm run build
