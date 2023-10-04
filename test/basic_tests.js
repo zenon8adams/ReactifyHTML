@@ -133,10 +133,8 @@ describe('ReactifyHTML::path', () => {
     });
 
     it('should remove every back reference in path (..)', () => {
-        expect(cv.removeBackLinks('usr/../bin'))
-            .to.equal(path.join('usr', 'bin'));
-        expect(cv.removeBackLinks('usr/../'))
-            .to.equal(path.join('usr', path.sep));
+        expect(cv.removeBackLinks('/usr/../bin')).to.equal('/usr/bin');
+        expect(cv.removeBackLinks('/usr/../')).to.equal('/usr/');
         expect(cv.removeBackLinks('../..')).to.equal('');
     });
 
