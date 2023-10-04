@@ -816,14 +816,21 @@ async function emplaceInRoot(scripts, resourcePath) {
 
 function deriveNameFrom(filePath) {
     const {ext} = path.parse(filePath);
-    const name  = filePath.slice(0, -ext.length);
-    const page  = Array.from(name.matchAll(/([a-zA-Z0-9_]+)/g))
-                     .reduce((acc, m) => acc + capitalize(m[1]), '')
-                     .concat('Page');
+    const name =
+        filePath.slice(0, isEmpty(ext) ? filePath.length : -ext.length);
+    let page = Array.from(name.matchAll(/([a-zA-Z0-9_]+)/g))
+                   .reduce((acc, m) => acc + capitalize(m[1]), '');
+    if (!page.endsWith('Page')) {
+        page = page.concat('Page');
+    }
+
     return page.match(/^[0-9]/) ? 'A_' + page : page;
 }
 
 function capitalize(str) {
+    if (isEmpty(str)) {
+        return str;
+    }
     return str[0].toUpperCase() + str.slice(1).toLowerCase();
 }
 
@@ -2231,6 +2238,9 @@ function adaptToHTML(doc, element) {
     return externalResolver;
 }
 
+/*
+ * NB! Generator gives a maximum of 9 digits.
+ */
 function randomCounter(nDigits) {
     return Math.floor((Math.random() + .001) * 0xdeadbeef)
         .toString(nDigits)
@@ -2302,7 +2312,7 @@ function modifyAttributes(node, attributes) {
 }
 
 function isNamespaced(attribute) {
-    return attribute.match(/^([a-z-]+):([a-z-]+)$/);
+    return !!attribute.match(/^([a-z-]+):([a-z-]+)$/);
 }
 
 function augment(attr) {
@@ -2536,3 +2546,136 @@ function shiftByAttrs(page, off) {
             return off;
     } while (off < pageLen);
 }
+
+function exports() {
+    if (process.env.NODE_ENV === 'test') {
+        return {
+            generateAllPages,
+            resolveLandingPage,
+            tryDecodeFromMagic,
+            readFile,
+            getRootDirectory,
+            unzipProject,
+            unGzipProject,
+            checkIfActuallyRoot,
+            findIndexFile,
+            downloadProject,
+            removeTemplates,
+            removeUnusedTags,
+            buildPathTemplateFrom,
+            addScripts,
+            emplaceInRoot,
+            deriveNameFrom,
+            capitalize,
+            strJoin,
+            uniquefyMetas,
+            isSuperSetOf,
+            uniquefyPages,
+            uniquefy,
+            removeAbsoluteRef,
+            pageIsInStream,
+            joinAttrs,
+            duplicatePageTemplate,
+            emplaceHooks,
+            removeHooks,
+            deleteFilesMatch,
+            emplaceRootAttrs,
+            emplaceLinks,
+            emplaceMetas,
+            overrideSet,
+            updateFaviconAddress,
+            emplaceTitle,
+            emplaceStyle,
+            fixupWebpack,
+            bt,
+            relinkPages,
+            fixAnchorRoutes,
+            fixEmptyLinks,
+            emplaceApp,
+            getPageRoute,
+            emplaceHTML,
+            useJSXStyleComments,
+            emplaceImpl,
+            clip,
+            updateLinksFromLinksContent,
+            updateStyleLinks,
+            unQuote,
+            updateMissingLinks,
+            copyResolvedAssetsToOutputDirectory,
+            generateAssetsFinalDirectory,
+            useOSIndependentPath,
+            removeBackLinks,
+            retrieveAssetsFromGlobalDirectory,
+            filterAssetsByRelativity,
+            removeRelativeHyperlinks,
+            resolveGlobalAssetsPath,
+            indexDirectory,
+            isSelfReference,
+            buildExternalSource,
+            isGeneratedScriptName,
+            sanitizedPrompt,
+            parseFile,
+            buildAssetLookup,
+            isVersioned,
+            initializeProjectStructure,
+            buildPathIgnore,
+            buildRegularExpression,
+            treat,
+            cleanOldFiles,
+            cleanTemporaryFiles,
+            removePath,
+            deleteDirectory,
+            extractDescription,
+            extractTitle,
+            extractLinks,
+            extractMetas,
+            extractAllPageLinks,
+            getIndexer,
+            extractStyles,
+            escapeAllJSXQuotes,
+            escapeJSXQuotesIn,
+            nextOf,
+            isInComment,
+            matchClosely,
+            extractComments,
+            extractAllScripts,
+            adaptToHTML,
+            randomCounter,
+            refitTags,
+            reconstructTree,
+            modifyAttributes,
+            isNamespaced,
+            augment,
+            modifyEscapeIntent,
+            getAttributesRaw,
+            getAttributes,
+            formatStyle,
+            sortIndexDesc,
+            isArray,
+            isString,
+            isBoolean,
+            isNumber,
+            isObject,
+            isRegExp,
+            isNotEmpty,
+            isEmpty,
+            isBehaved,
+            isNotBehaved,
+            isDefined,
+            isNotDefined,
+            isNull,
+            isNotNull,
+            isAbsoluteURI,
+            isWindowsPath,
+            lastEntry,
+            fullPathOf,
+            closeSelfClosingTags,
+            expandMatches,
+            shiftByAttrs,
+        };
+    }
+
+    return {};
+};
+
+export default exports();
