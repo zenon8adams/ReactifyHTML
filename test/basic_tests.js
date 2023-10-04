@@ -139,9 +139,8 @@ describe('ReactifyHTML::path', () => {
     });
 
     it('should return parent path', () => {
-        expect(cv.getRootDirectory('/usr/bin'))
-            .to.equal(path.join(path.sep, 'usr'));
-        expect(cv.getRootDirectory('/')).to.equal(path.sep);
+        expect(cv.getRootDirectory('/usr/bin')).to.equal('/usr');
+        expect(cv.getRootDirectory('/')).to.equal('/');
     });
 });
 
