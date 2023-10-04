@@ -138,7 +138,7 @@ const Magic = {
     Gzip: new Uint8Array([0x1F, 0x8B, 0x08]),
 };
 const MAX_MAGIC_LENGTH = 40;
-
+const MAX_REDIRECT     = 5;
 // Make it unmodifiable.
 modifyLock(converterConfig, Decompressor, Magic);
 
@@ -458,7 +458,7 @@ async function readFile(filepath, maxLength) {
     return new Promise(async (resolve, reject) => {
         fs.open(filepath, 'r', (o_err, fd) => {
             if (o_err) {
-                reject(err);
+                reject(o_err);
                 return;
             }
 
@@ -536,6 +536,10 @@ async function decompressZipImpl(archivePath) {
     let seenRootDir = false;
     return new Promise((resolve, reject) => {
         yauzl.open(archivePath, {lazyEntries: true}, async (err, zipfile) => {
+            if (err) {
+                reject(err);
+                return;
+            }
             // track when we've closed all our file handles
             function incrementHandleCount() {
                 handleCount++;
@@ -595,6 +599,19 @@ async function decompressZipImpl(archivePath) {
     });
 }
 
+/*
+ * From continuously calling this function
+ * with stream of paths, it returns if
+ * the list of all files passed have the
+ * same root path. It selects the first
+ * provided path as the supposed root path
+ * if it is not provided.
+ *
+ * It is useful when decoding compressed
+ * files. The first read path from the
+ * compressed files will be the root
+ * directory if it exists.
+ */
 function checkIfActuallyRoot(maybeRootDir, readPath) {
     if (isEmpty(maybeRootDir)) {
         maybeRootDir = readPath;
@@ -622,6 +639,11 @@ async function findIndexFile(providedPath) {
                 directoryQueue.push(filePath);
             }
         }
+        /*
+         * Convert a depth-first-search into a
+         * breadth-first search by keeping the
+         * next nodes to explore in a queue.
+         */
         for (const directory of directoryQueue) {
             const file = await findIndexFileImpl(directory);
             if (isDefined(file)) {
@@ -635,7 +657,7 @@ async function findIndexFile(providedPath) {
     return file;
 }
 
-async function downloadProject(url, original) {
+async function downloadProject(url, original, redirectDepth) {
     const {base} = path.parse(original ?? url);
     const scheme = url.slice(0, url.indexOf('://'));
     assert(scheme === 'http' || scheme === 'https');
@@ -644,8 +666,12 @@ async function downloadProject(url, original) {
     return new Promise((resolve, reject) => {
                protocol.get(url, (response) => {
                    const {statusCode} = response;
+                   // We have been redirected
                    if (statusCode === 302) {
-                       resolve({redirectUrl: response.headers.location});
+                       resolve({
+                           redirectUrl: response.headers.location,
+                           depth: redirectDepth ?? 1
+                       });
                        response.resume();
                        return;
                    } else if (statusCode !== 200) {
@@ -664,10 +690,18 @@ async function downloadProject(url, original) {
                    });
                });
            })
-        .then(
-            (next) => next.redirectUrl ?
-                downloadProject(next.redirectUrl, url) :
-                resolveLandingPage(next.path));
+        .then(/* If we are redirected, recurse with the new path */
+              (next) => {
+                  if (next.redirectUrl && next.depth <= MAX_REDIRECT) {
+                      return downloadProject(
+                          next.redirectUrl, url, next.depth + 1);
+                  } else if (next.depth > MAX_REDIRECT) {
+                      return Promise.reject(
+                          new Error('Maxium redirect reached'));
+                  } else {
+                      return resolveLandingPage(next.path);
+                  }
+              });
 }
 
 async function removeTemplates(resourcePath) {
@@ -879,18 +913,14 @@ function uniquefyMetas(metas) {
 
 // Requires arguments to be sorted.
 function isSuperSetOf(standard, given) {
-    const minLen = Math.min(standard.length, given.length);
-    const sMin   = standard.slice(0, minLen);
-    const gMin   = given.slice(0, minLen);
-    if (minLen !== given.length)
-        return false;
-
-    for (let i = 0; i < minLen; ++i) {
-        if (sMin[i] !== gMin[i])
-            return false;
+    let j = 0;
+    for (let i = 0; i < standard.length && j < given.length; ++i) {
+        if (standard[i] === given[j]) {
+            ++j;
+        }
     }
 
-    return true;
+    return j == given.length;
 }
 
 function uniquefyPages(newPages, allPages, mainDir) {
@@ -1342,8 +1372,8 @@ function useJSXStyleComments(rawHTML) {
      * Add padding to the new comment in case the
      * contents of the comment starts with a `/`.
      */
-    return rawHTML.replace(/<!--([^]*?)-->/gm, '{/* \$1 */}')
-        .replace(/(\/\*[^\/]*?(?<=\*)\/(?!\}))/gm, '{ \$1 }');
+    return rawHTML.replace(/<!--([^]*?)-->/gm, '{/* $1 */}')
+        .replace(/(\/\*[^\/]*?(?<=\*)\/(?!\}))/gm, '{ $1 }');
 }
 
 async function emplaceImpl(tag, readPath, writePath, replacement) {
@@ -1791,7 +1821,7 @@ function buildExternalSource(doc, pageSourceFile, tags) {
 }
 
 function isGeneratedScriptName(name) {
-    return name?.match(/^sc-\d{4}\.[a-z]+$/);
+    return !!name?.match(/^sc-\d{4}\.[a-z]+$/);
 }
 
 async function sanitizedPrompt(message) {
@@ -2072,8 +2102,9 @@ async function getIndexer() {
 
 function extractStyles(doc) {
     const allStyles = Array.from(doc.querySelectorAll('style'));
-    if (isEmpty(allStyles))
+    if (isEmpty(allStyles)) {
         return '';
+    }
 
     const jointStyles = allStyles.map(style => style.innerHTML)
                             .reduce((acc, style) => acc + '\n' + style, '')
@@ -2550,7 +2581,6 @@ function shiftByAttrs(page, off) {
 function exports() {
     if (process.env.NODE_ENV === 'test') {
         return {
-            generateAllPages,
             resolveLandingPage,
             tryDecodeFromMagic,
             readFile,
