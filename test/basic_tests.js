@@ -1,4 +1,5 @@
 import chai from 'chai';
+import path from 'node:path';
 
 import cv from '../index.js';
 
@@ -115,7 +116,8 @@ describe('ReactifyHTML::find', () => {
 
 describe('ReactifyHTML::path', () => {
     it('should return reference to previous directory', () => {
-        expect(cv.bt('/usr/local/bin')).to.equal('/usr/local');
+        expect(cv.bt(path.join('usr', 'local', 'bin')))
+            .to.equal(path.join('usr', 'local'));
     });
 
     it('should return absolute path of argument', () => {
@@ -131,14 +133,17 @@ describe('ReactifyHTML::path', () => {
     });
 
     it('should remove every back reference in path (..)', () => {
-        expect(cv.removeBackLinks('/usr/../bin')).to.equal('/usr/bin');
-        expect(cv.removeBackLinks('/usr/../')).to.equal('/usr/');
+        expect(cv.removeBackLinks('usr/../bin'))
+            .to.equal(path.join('usr', 'bin'));
+        expect(cv.removeBackLinks('usr/../'))
+            .to.equal(path.join('usr', path.sep));
         expect(cv.removeBackLinks('../..')).to.equal('');
     });
 
     it('should return parent path', () => {
-        expect(cv.getRootDirectory('/usr/bin')).to.equal('/usr');
-        expect(cv.getRootDirectory('/')).to.equal('/');
+        expect(cv.getRootDirectory('/usr/bin'))
+            .to.equal(path.join(path.sep, 'usr'));
+        expect(cv.getRootDirectory('/')).to.equal(path.sep);
     });
 });
 
