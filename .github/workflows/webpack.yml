@@ -25,13 +25,20 @@ jobs:
     steps:
       - uses: actions/checkout@v3
 
+      - uses: pnpm/action-setup@v2
+        with:
+          version: 8
+          
       - name: Use Node.js ${{ matrix.node-version }}
         uses: actions/setup-node@v3
         with:
           node-version: ${{ matrix.node-version }}
 
       - name: Install dependencies (Project)
-        run: yarn install
+        run: pnpm install
+
+      - name: Run all tests
+        run: pnpm test
       
       - name: Generate template (Index)
         run: node index.js
@@ -44,15 +51,15 @@ jobs:
 
       - name: Install build dependencies (Index)
         working-directory: build
-        run: yarn install
+        run: pnpm install
 
       - name: Format code (Index)
         working-directory: build
-        run: yarn run format
+        run: pnpm run format
 
       - name: Build CRA (Index)
         working-directory: build
-        run: yarn run build
+        run: pnpm run build
 
       - name: Generate archive template (Local archive)
         run: node index.js examples/index.zip
@@ -65,15 +72,15 @@ jobs:
       
       - name: Install build dependencies (Local archive)
         working-directory: build
-        run: yarn install
+        run: pnpm install
 
       - name: Format code (Local archive)
         working-directory: build
-        run: yarn run format
+        run: pnpm run format
 
       - name: Build CRA (Local archive)
         working-directory: build
-        run: yarn run build
+        run: pnpm run build
 
       - name: Generate template (Online archive)
         run: node index.js https://github.com/themewagon/mexant/archive/refs/tags/v1.0.0.zip
@@ -86,12 +93,12 @@ jobs:
       
       - name: Install build dependencies (Online archive)
         working-directory: build
-        run: yarn install
+        run: pnpm install
 
       - name: Format code (Online archive)
         working-directory: build
-        run: yarn run format
+        run: pnpm run format
 
       - name: Build CRA (Online archive)
         working-directory: build
-        run: yarn run build
+        run: pnpm run build

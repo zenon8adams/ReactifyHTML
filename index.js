@@ -2239,7 +2239,7 @@ function adaptToHTML(doc, element) {
 }
 
 /*
- * NB! Generator gives a maximum of 9 digits.
+ * NB! Generator gives a maximum of 10 digits.
  */
 function randomCounter(nDigits) {
     return Math.floor((Math.random() + .001) * 0xdeadbeef)
