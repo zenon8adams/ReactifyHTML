@@ -177,9 +177,12 @@ const                        mainSourceDir = getRootDirectory(mainSourceFile);
 
 modifyLock(mainSourceFile, mainSourceDir);
 
-/*
+/*\
  * Program starting point.
- */
+ * We try to simulate an page element
+ * since we don't have access to a
+ * page generator yet.
+\*/
 generateAllPages({
     href: mainSourceFile,
     isLanding: true,
@@ -217,7 +220,7 @@ async function generateAllPages(landingPage) {
                  * an href property hence, their resolved
                  * realpath property is used as their real
                  * location.
-                 \*/
+                \*/
                 const pageLocationFile = page?.res?.realpath ?? page.href;
                 const pageLocation     = path.dirname(pageLocationFile);
 
@@ -279,9 +282,18 @@ async function generateAllPages(landingPage) {
                 logger.info('All styles for page:', page.realpath, pageStyles);
 
                 const pageDescription = extractDescription(pageMetas);
-                const pageName        = deriveNameFrom(pageID);
+                const pageName =
+                    deriveNameFrom(pageID, {strip: true, suffix: 'Page'});
+                /*
+                 * For the initial page, resource info (res) is not
+                 * available since we are simulating it, that is it doesn't
+                 * have an HTMLElement that can be attributed to it.
+                 *
+                 * remove the `Page` suffix from page name.
+                 */
                 const pageFile =
-                    path.join((page?.res?.dir ?? ''), pageName) + '.jsx';
+                    path.join((page?.res?.dir ?? ''), pageName.slice(0, -4)) +
+                    '.jsx';
                 const pageInfo = {
                     pageID: pageID,
                     name: pageName,
@@ -848,17 +860,19 @@ async function emplaceInRoot(scripts, resourcePath) {
     await removeHooks('*', resourcePath);
 }
 
-function deriveNameFrom(filePath) {
-    const {ext} = path.parse(filePath);
-    const name =
-        filePath.slice(0, isEmpty(ext) ? filePath.length : -ext.length);
-    let page = Array.from(name.matchAll(/([a-zA-Z0-9_]+)/g))
+function deriveNameFrom(filePath, opts) {
+    const {strip, suffix} = opts ?? {};
+    const base            = strip ? path.basename(filePath) : filePath;
+    const {ext}           = path.parse(base);
+    const name = base.slice(0, isEmpty(ext) ? base.length : -ext.length);
+    let   page = Array.from(name.matchAll(/([a-zA-Z0-9]+)/g))
                    .reduce((acc, m) => acc + capitalize(m[1]), '');
-    if (!page.endsWith('Page')) {
-        page = page.concat('Page');
+
+    if (suffix && !page.match(new RegExp(`${suffix}$`, 'i'))) {
+        page += suffix;
     }
 
-    return page.match(/^[0-9]/) ? 'A_' + page : page;
+    return page.match(/^[0-9]/) ? 'P_' + page : page;
 }
 
 function capitalize(str) {
@@ -1231,11 +1245,11 @@ async function relinkPages(pages, resourcePath) {
         const {html} = page;
         assert(html);
 
-        /*
+        /*\
          * Anchor attributes of the form href="" resolve to homepage.
          * We have to prevent default on this kind of links to prevent
          * the page from reloading.
-         */
+        \*/
         const allEmptyLinks =
             Array.from(html.matchAll(empty_re)).sort(sortIndexDesc);
 
@@ -1322,16 +1336,20 @@ async function emplaceApp(pages, resourcePath) {
     for (const page of pages) {
         const {name, title, description} = page.info;
         const [pageUrl, realname]        = getPageRoute(page);
-        allPageCases                     = strJoin(
-                                allPageCases, `case '${pageUrl}':\n`, `\ttitle = '${title}';\n`,
+
+        const pageIncl = './' + path.normalize('pages/' + realname);
+        const declName = deriveNameFrom(realname, {suffix: 'Page'});
+
+        allPageCases = strJoin(
+            allPageCases, `case '${pageUrl}':\n`, `\ttitle = '${title}';\n`,
             `\tmetaDescription = '${description}';\n`, `\tbreak;\n`, '\t');
+
         allRoutes = strJoin(
             allRoutes, `<Route`, `path="${pageUrl}"`,
-            `element={<${name} />} />\n\t\t`, ' ');
+            `element={<${declName} />} />\n\t\t`, ' ');
 
-        const pageIncl = strJoin('.', 'pages', realname, '/');
 
-        routesIncl = routesIncl + `\nimport ${name} from '${pageIncl}';`;
+        routesIncl = routesIncl + `\nimport ${declName} from '${pageIncl}';`;
 
         Object.assign(page, {...page, route: pageUrl});
     }
@@ -2032,7 +2050,7 @@ async function extractAllPageLinks(doc, pageSourceFile, resourcePath) {
             .map(link => {
                 // Implicit references such as: /docs/api
                 // refers to the index.html file found
-                // in that directory relative to the root
+                // in that directory.
                 // i.e /docs/api/index.html
                 const isImplicit = lastEntry(link.href) === '/' ||
                     isEmpty(path.parse(link.href).ext);
@@ -2262,6 +2280,10 @@ function extractAllScripts(doc) {
     return scripts;
 }
 
+/*
+ * For template html in scripts, convert them to `object` element.
+ * And embed them into the page.
+ */
 function adaptToHTML(doc, element) {
     const externalResolver = doc.createElement('object');
     modifyAttributes(externalResolver, getAttributes(element));
@@ -2269,9 +2291,9 @@ function adaptToHTML(doc, element) {
     return externalResolver;
 }
 
-/*
+/*\
  * NB! Generator gives a maximum of 10 digits.
- */
+\*/
 function randomCounter(nDigits) {
     return Math.floor((Math.random() + .001) * 0xdeadbeef)
         .toString(nDigits)
@@ -2342,6 +2364,11 @@ function modifyAttributes(node, attributes) {
     });
 }
 
+/*\
+ * For namespaced attributes such
+ * as SVG's xmlns:prefix, return
+ * true.
+\*/
 function isNamespaced(attribute) {
     return !!attribute.match(/^([a-z-]+):([a-z-]+)$/);
 }
@@ -2360,6 +2387,16 @@ function modifyEscapeIntent(node, attribute, attributes) {
     }
 }
 
+/*\
+ * Return a non-augmented list of
+ * attributes of an HTMLNode.
+ * A non-augmented attribute
+ * does not have it attribue
+ * name prefixed by REPL_ID.
+ * It is similar in structure to
+ * what is returned by
+ * el.getAttribute.
+\*/
 function getAttributesRaw(node) {
     const attributeNodeArray = Array.prototype.slice.call(node.attributes);
     return attributeNodeArray.reduce(
@@ -2372,6 +2409,12 @@ function getAttributesRaw(node) {
         {});
 }
 
+/*\
+ * Return a list of augmented HTMLNode
+ * attributes. The augmentation process
+ * modifies each attribute to be suitable
+ * for processing in the JSX context.
+\*/
 function getAttributes(node) {
     const attributeNodeArray = Array.prototype.slice.call(node.attributes);
 
@@ -2400,6 +2443,9 @@ function formatStyle(value) {
                     return '';
                 const oneMatches = Array.from(one.matchAll(/-([a-z])/gm));
                 if (isEmpty(oneMatches) || isUserDefined) {
+                    /*\
+                     * Escape user defined css property in inline styles
+                    \*/
                     if (isUserDefined)
                         return `'${one}': \`${other}\``;
                     return `${one}: \`${other}\``;
