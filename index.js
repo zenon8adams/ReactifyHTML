@@ -1376,7 +1376,7 @@ async function emplaceApp(pages, resourcePath) {
         const {name, title, description} = page.info;
         const [pageUrl, realname]        = getPageRoute(page);
 
-        const pageIncl = './' + path.normalize('pages/' + realname);
+        const pageIncl = useOSIndependentPath('./pages/' + realname);
         const declName = deriveNameFrom(realname, {suffix: 'Page'});
 
         allPageCases = strJoin(
@@ -1702,7 +1702,7 @@ function generateAssetsFinalDirectory(assetBundle) {
 }
 
 function useOSIndependentPath(p) {
-    return p.replace(new RegExp(`\\${path.sep}`, 'g'), '/');
+    return p.replace(new RegExp(`${path.sep}${path.sep}+`, 'g'), '/')
 }
 
 /*\
