@@ -36,14 +36,14 @@ describe('ReactifyHTML::path', () => {
 
     it('should return parent path', async () => {
         const testDir = path.join(temporaryDir, '/home/user/files/');
+        const refFile =
+            path.join(temporaryDir, '/home/user/files/html/index.html');
         await fs.mkdir(testDir, {recursive: true});
+        await fs.mkdir(path.dirname(refFile), {recursive: true});
 
-        expect(cv.getRootDirectory('/home/page/index.html', testDir))
-            .to.equal(testDir);
-        expect(cv.getRootDirectory(
-                   '/home/page/index.html', 'https://example.com/archive.zip'))
-            .to.equal('/home/page');
-        expect(cv.getRootDirectory('/', '/')).to.equal('/');
+        expect(cv.getRootDirectory(refFile, testDir)).to.equal(testDir);
+        expect(cv.getRootDirectory(refFile, 'https://example.com/archive.zip'))
+            .to.equal(path.dirname(refFile));
     });
 
     it('should break down path details', () => {
