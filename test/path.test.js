@@ -25,8 +25,12 @@ describe('ReactifyHTML::path', () => {
     });
 
     it('should return parent path', () => {
-        expect(cv.getRootDirectory('/usr/bin')).to.equal('/usr');
-        expect(cv.getRootDirectory('/')).to.equal('/');
+        expect(cv.getRootDirectory('/home/page/index.html', '/usr/bin'))
+            .to.equal('/usr/bin');
+        expect(cv.getRootDirectory(
+                   '/home/page/index.html', 'https://example.com/archive.zip'))
+            .to.equal('/home/page');
+        expect(cv.getRootDirectory('/', '/')).to.equal('/');
     });
 
     it('should break down path details', () => {
