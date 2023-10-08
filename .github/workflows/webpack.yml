@@ -83,7 +83,7 @@ jobs:
         run: pnpm run build
 
       - name: Generate template (Online archive)
-        run: node index.js https://github.com/themewagon/mexant/archive/refs/tags/v1.0.0.zip
+        run: node index.js https://github.com/technext/novena/releases/download/v.01/novena.zip
       
       - name: Echo Logs (Online archive)
         if: always()

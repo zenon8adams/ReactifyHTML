@@ -18,9 +18,9 @@ export const metaTags = [
 ];
 
 export const linkTags = [
-    {rel: 'icon', href: 'favicon.ico'},
-    {rel: 'apple-touch-icon', href: 'logo192.png'},
-    {rel: 'manifest', href: 'manifest.json'}
+    {rel: 'icon', href: '/favicon.ico'},
+    {rel: 'apple-touch-icon', href: '/logo192.png'},
+    {rel: 'manifest', href: '/manifest.json'}
 ];
 
 export const projectDependencyInjectionTags =
