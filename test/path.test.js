@@ -1,4 +1,14 @@
+import fs from 'node:fs/promises';
+import os from 'node:os';
+import {rimraf} from 'rimraf';
+
 import {cv, expect, path} from './test_setup.js';
+
+const sessionID    = '0x01729012';
+const temporaryDir = path.join(os.tmpdir(), 'ReactifyHTML', sessionID);
+before(async () => {
+    await fs.mkdir(temporaryDir, {recursive: true});
+});
 
 describe('ReactifyHTML::path', () => {
     it('should return reference to previous directory', () => {
@@ -24,25 +34,32 @@ describe('ReactifyHTML::path', () => {
         expect(cv.removeBackLinks('../..')).to.equal('');
     });
 
-    it('should return parent path', () => {
-        expect(cv.getRootDirectory('/home/page/index.html', '/usr/bin'))
-            .to.equal('/usr/bin');
-        expect(cv.getRootDirectory(
-                   '/home/page/index.html', 'https://example.com/archive.zip'))
-            .to.equal('/home/page');
-        expect(cv.getRootDirectory('/', '/')).to.equal('/');
+    it('should return parent path', async () => {
+        const testDir = path.join(temporaryDir, '/home/user/files/');
+        const refFile =
+            path.join(temporaryDir, '/home/user/files/html/index.html');
+        await fs.mkdir(testDir, {recursive: true});
+        await fs.mkdir(path.dirname(refFile), {recursive: true});
+
+        expect(cv.getRootDirectory(refFile, testDir)).to.equal(testDir);
+        expect(cv.getRootDirectory(refFile, 'https://example.com/archive.zip'))
+            .to.equal(path.dirname(refFile));
     });
 
     it('should break down path details', () => {
-        const os_re = p => p.replace('/', path.sep);
+        const os_re = p => cv.useOSIndependentPath(p);
         const file      = '/home/user/files/img-driver.jpg?v1.23.22';
         const fileInfo  = cv.parseFile(file);
 
-        expect(fileInfo.original).to.equal(os_re(file));
-        expect(fileInfo.realpath)
+        expect(os_re(fileInfo.original)).to.equal(os_re(file));
+        expect(os_re(fileInfo.realpath))
             .to.equal(os_re(file.slice(0, file.indexOf('?'))));
         expect(fileInfo.extv2)
             .to.equal(file.slice(file.indexOf('.') + 1, file.indexOf('?')));
         expect(fileInfo.version).to.equal(file.slice(file.indexOf('?') + 1));
     });
+});
+
+after(async () => {
+    await rimraf(temporaryDir);
 });
