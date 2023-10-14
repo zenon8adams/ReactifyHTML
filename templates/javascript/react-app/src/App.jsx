@@ -1,6 +1,8 @@
 import logo from './logo.svg';
 import { useEffect } from 'react';
-import { Routes, Route, useNavigationType, useLocation } from 'react-router-dom';@{ROUTES_INCLUDE}
+import { HelmetProvider } from 'react-helmet-async';
+import { Routes, Route, useNavigationType, useLocation } from 'react-router-dom';
+@{ROUTES_INCLUDE}
 
 function App() {
     const action = useNavigationType();
@@ -35,12 +37,11 @@ function App() {
         }
     }, [pathname]);
     
-    return (
-        <>
-            <Routes>
-            	@{ROUTES_CONTENT}
-            </Routes>
-        </>
+    return (<HelmetProvider>
+                <Routes>
+            	    @{ROUTES_CONTENT}
+                </Routes>
+            </HelmetProvider>
     );
 }
 
