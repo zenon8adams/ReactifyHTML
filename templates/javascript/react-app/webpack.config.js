@@ -17,7 +17,7 @@ module.exports = () => {
         require('dotenv').config({path: './.env'});
     }
     return {
-        mode: Modes.PRODUCTION,
+        mode: process.env?.NODE_ENV ?? Modes.PRODUCTION,
         entry: path.join(__dirname, 'src', 'index.jsx'),
         cache: true,
         resolve: {
@@ -45,11 +45,7 @@ module.exports = () => {
                     use: [
                         'style-loader', {
                             loader: 'css-loader',
-                            options: {
-                            url: {
-                                    filter: url => url[0] !== '/'
-                                }
-                            }
+                            options: {url: {filter: url => url[0] !== '/'}}
                         },
                         'postcss-loader'
                     ],

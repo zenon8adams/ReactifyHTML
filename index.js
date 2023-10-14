@@ -1,4 +1,4 @@
-/*
+/*\
  * MIT License
  *
  *
@@ -21,7 +21,7 @@
  *   LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
  *   FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
  *   DEALINGS IN THE SOFTWARE.
- */
+\*/
 'use strict';
 import fsExtra from 'fs-extra';
 const {move: moveAll, copy: duplicate} = fsExtra;
@@ -73,25 +73,24 @@ modifyLock(REPL_ID);
 
 const STYLE_TAG        = 'STYLE_CONTENT';
 const APP_TAG          = 'APP_CONTENT';
-const HOOKS_TAG        = 'HOOKS_CONTENT';
 const TITLE_TAG        = 'TITLE_CONTENT';
 const META_TAG         = 'META_CONTENT';
 const LINK_TAG         = 'LINK_CONTENT';
-const PAGE_TAG         = 'PAGE_CONTENT';
 const ROUTES_TAG       = 'ROUTES_CONTENT';
 const REACT_IMPORT_TAG = 'REACT_IMPORT';
+const PAGE_CONTENT_TAG = 'PAGE_CONTENT';
+const PAGE_SCRIPT_TAG  = 'PAGE_SCRIPT';
 
 modifyLock(
-    REPL_ID, STYLE_TAG, APP_TAG, HOOKS_TAG, TITLE_TAG, META_TAG, LINK_TAG,
-    PAGE_TAG, ROUTES_TAG);
+    REPL_ID, STYLE_TAG, APP_TAG, TITLE_TAG, META_TAG, LINK_TAG, ROUTES_TAG,
+    REACT_IMPORT_TAG, PAGE_CONTENT_TAG, PAGE_SCRIPT_TAG);
 
 const STYLE_INC_TAG  = 'STYLE_INCLUDE';
-const HOOKS_INC_TAG  = 'HOOKS_INCLUDE';
 const SCRIPT_INC_TAG = 'SCRIPT_INCLUDE';
 const ROUTES_INC_TAG = 'ROUTES_INCLUDE';
 const USE_IMPORT_TAG = 'USE_IMPORT';
 
-modifyLock(STYLE_INC_TAG, HOOKS_INC_TAG, SCRIPT_INC_TAG, ROUTES_INC_TAG);
+modifyLock(STYLE_INC_TAG, SCRIPT_INC_TAG, ROUTES_INC_TAG);
 
 const ROOT_ATTR_TAG = 'ROOT_ATTRIBUTES';
 
@@ -115,19 +114,17 @@ const PAGE_NAME_TAG = 'PAGE_NAME';
 modifyLock(PAGE_INFO_TAG, PAGE_NAME_TAG);
 
 const BUILD_DIR  = 'build';
-const HOOKS_DIR  = 'hooks';
 const ASSETS_DIR = 'assets';
 
-modifyLock(BUILD_DIR, HOOKS_DIR, ASSETS_DIR);
+modifyLock(BUILD_DIR, ASSETS_DIR);
 
 const converterConfig = {
-    useHooks: false,
     searchDepth: -1,
     deduceAssetsPathFromBaseDirectory: true,
     usePathRelativeIndex: true,
     archive: false,
     entryPoint: 'index.html',
-    weakReplacement: true
+    weakReplacement: false
 };
 
 const Decompressor = {
@@ -196,12 +193,8 @@ async function generateAllPages(landingPage) {
     let allPageMetas = [], allStyles = '', allLinks = [], allScripts = [],
         allPages = [];
 
-    const {useHooks} = converterConfig;
-    assert(isDefined(useHooks));
-
     async function generateAllPagesImpl(pages, resourcePath) {
         let   pagesStream      = [].concat(pages);
-        let   updatedLinks     = [];
         let   currentPageStyle = '';
         const qLookup          = {};
         const resolvedLinks    = {};
@@ -255,24 +248,30 @@ async function generateAllPages(landingPage) {
 
                 await reconstructTree(root, pageLocationFile);
 
-                // FIXME: Scripts can be loaded either via local hooks
-                //  or in the global index page.
                 const scripts                    = await extractAllScripts(doc);
                 const                 pageStyles = extractStyles(doc);
                 await                 updateMissingLinks(
                                     doc, pageLocationFile, resourcePath, currentPageLinks,
                                     scripts);
+                /*\
+                 * Wrap scripts with anonymous function to
+                 * prevent variables declared in the
+                 * global scope from being redeclared
+                 * when a component is remounted.
+                \*/
+                await wrapScriptsWithAnon(scripts, resourcePath);
 
-                updatedLinks = await updateLinksFromLinksContent(
-                    pageLocationFile, resourcePath, currentPageLinks,
-                    resolvedLinks);
+                const pageLinks = uniquefy(
+                    [],
+                    await updateLinksFromLinksContent(
+                        pageLocationFile, resourcePath, currentPageLinks,
+                        resolvedLinks),
+                    'href');
 
-                allLinks = uniquefy(allLinks, updatedLinks, 'href');
-
-                currentPageStyle = await updateStyleLinks(
+                const pageStyle = await updateStyleLinks(
                     pageLocationFile, resourcePath, pageStyles);
 
-                allStyles = strJoin(allStyles, currentPageStyle, '\n');
+                allStyles = strJoin(allStyles, pageStyle, '\n');
 
                 // We have to delay the write of the transformed
                 // html because we need to resolve all pages that
@@ -292,7 +291,7 @@ async function generateAllPages(landingPage) {
                  * available since we are simulating it, that is it doesn't
                  * have an HTMLElement that can be attributed to it.
                  *
-                 * remove the `Page` suffix from page name.
+                 * Remove the `Page` suffix from page name.
                 \*/
                 const pageFile = removeBackLinks(
                     path.join((page.dir ?? ''), pageName.slice(0, -4)) +
@@ -305,22 +304,30 @@ async function generateAllPages(landingPage) {
                     path: pageFile
                 };
 
+                Object.assign(page, {...page, html: rawHTML, info: pageInfo});
                 logger.info('PageInfo: ', pageInfo);
+
+                const pagePath = getPagePath(page.info.path, resourcePath);
 
                 await duplicatePageTemplate(pageFile, resourcePath);
                 // If this is the landing page
                 if (i === 0) {
                     await emplaceRootAttrs(root, resourcePath);
-                    await emplaceTitle(pageTitle, resourcePath);
                 }
 
-                useHooks && await addScripts(scripts, pageFile, resourcePath);
+                /*\
+                 * We use Helmet to resolve scripts, metas and links
+                 * instead of loading them directly into the head.
+                 * This way, we can be sure that the react page
+                 * is as close as possible to the HTML page we
+                 * are generating from, hence, introducing minimal
+                 * errors if any.
+                \*/
 
-                Object.assign(page, {...page, html: rawHTML, info: pageInfo});
-                allScripts   = useHooks ?
-                      allScripts :
-                      uniquefy(allScripts, scripts, 'scriptName');
-                allPageMetas = allPageMetas.concat(pageMetas);
+                await emplaceTitle(pageTitle, pagePath);
+                await emplaceMetas(pageMetas, pagePath);
+                await emplaceLinks(pageLinks, pagePath);
+                await emplaceScripts(scripts, pagePath, resourcePath);
 
                 // Queue newly fetched pages to the stream.
                 pagesStream = pagesStream.concat(otherPages);
@@ -332,6 +339,7 @@ async function generateAllPages(landingPage) {
                     '\n\n');
             }
         } catch (err) {
+            console.error(err);
             logger.error(err);
             throw err;
         }
@@ -348,24 +356,12 @@ async function generateAllPages(landingPage) {
 
         logger.info('allPages: ', allPages);
 
-        allPageMetas = uniquefyMetas(allPageMetas);
-
-        await emplaceStyle(allStyles, processingParams);
-        await emplaceMetas(allPageMetas, processingParams);
-        await emplaceLinks(allLinks, processingParams);
-
-        !useHooks && await addScripts(allScripts, null, processingParams);
-
+        await emplaceStyles(allStyles, processingParams);
         await emplaceApp(allPages, processingParams);
-
         await relinkPages(allPages, processingParams);
-
         await emplaceHTML(allPages, processingParams);
-
         await fixupWebpack(processingParams);
-
         await finalizeWriter(allPages, processingParams);
-
         await removeTemplates(processingParams);
 
     } catch (err) {
@@ -501,10 +497,10 @@ function getRootDirectory(file, startingPath) {
     const dir = path.dirname(file);
     if (!isAbsoluteURI(startingPath) &&
         fs.statSync(startingPath).isDirectory()) {
-        /*
+        /*\
          * Check if the initial supplied path
          * is parent of the point where the file is found.
-         */
+        \*/
         if (path.relative(dir, startingPath).startsWith('..')) {
             return startingPath;
         }
@@ -753,6 +749,14 @@ async function removeTemplates(resourcePath) {
     await removePath(pageTemplateFullPath);
 }
 
+/*\
+ * Handles the logic of removing unused template
+ * declaration.
+ * It adds a favicon to the site. If not
+ * provided, it uses the reactjs favicon
+ * as default.
+\*/
+
 async function finalizeWriter(pages, resourcePath) {
     assert(isArray(pages));
     const {appB, scriptB, rootB, publicB, pageB, webpackB} = resourcePath;
@@ -770,10 +774,10 @@ async function finalizeWriter(pages, resourcePath) {
         const {name}       = page;
         const pageFullPath = path.join(pageB, page.info.path);
         await emplaceImpl(STYLE_INC_TAG, pageFullPath, pageFullPath, '');
-        await emplaceImpl(HOOKS_TAG, pageFullPath, pageFullPath, '');
-        await emplaceImpl(HOOKS_INC_TAG, pageFullPath, pageFullPath, '');
         await emplaceImpl(REACT_IMPORT_TAG, pageFullPath, pageFullPath, '');
         await emplaceImpl(USE_IMPORT_TAG, pageFullPath, pageFullPath, '');
+        await emplaceImpl(PAGE_SCRIPT_TAG, pageFullPath, pageFullPath, '');
+        await emplaceImpl(STYLE_TAG, pageFullPath, pageFullPath, '');
     }
 
     await emplaceImpl(SCRIPT_INC_TAG, rootB, rootB, '');
@@ -805,13 +809,11 @@ function buildPathTemplateFrom(dir) {
     return link;
 }
 
-async function addScripts(scripts, pagePath, resourcePath) {
+async function emplaceScripts(scripts, pagePath, resourcePath) {
     const {publicB, srcB}       = resourcePath;
     const conventionScriptPaths = buildAssetLookup();
-    const {useHooks}            = converterConfig;
     assert(isDefined(publicB));
     assert(isDefined(srcB));
-    assert(isDefined(useHooks) && isBoolean(useHooks));
 
     scripts
         .map(script => {
@@ -820,8 +822,7 @@ async function addScripts(scripts, pagePath, resourcePath) {
                 conventionScriptPaths[scriptInfo.extv2] ?? 'script';
 
             const scriptFile = path.join(ASSETS_DIR, conventionalScriptPath);
-            const scriptsFullPath = path.join(
-                !converterConfig.useHooks ? publicB : srcB, scriptFile);
+            const scriptsFullPath = path.join(publicB, scriptFile);
             return Object.assign(
                 script,
                 {...script, path: scriptsFullPath, shortPath: scriptFile});
@@ -832,53 +833,39 @@ async function addScripts(scripts, pagePath, resourcePath) {
 
     const useScripts = scripts.filter(script => script.isInline);
 
-    if (isEmpty(useScripts) && !useHooks) {
-        await removeHooks('*', resourcePath);
-    } else {
-        await Promise.all(useScripts.map(async (script) => {
-            await        fsp.mkdir(script.path, {recursive: true});
-            return await fsp.writeFile(
-                path.join(script.path, script.scriptName), script.content)
-        }));
-    }
+    await Promise.all(useScripts.map(async (script) => {
+        await        fsp.mkdir(script.path, {recursive: true});
+        return await fsp.writeFile(
+            path.join(script.path, script.scriptName), script.content)
+    }));
 
-    if (useHooks) {
-        await emplaceHooks(scripts, pagePath, resourcePath);
-    } else {
-        await emplaceInRoot(scripts, resourcePath);
-    }
+    await emplaceInPage(scripts, pagePath);
 }
 
-async function emplaceInRoot(scripts, resourcePath) {
+async function emplaceInPage(scripts, pagePath) {
     assert(isArray(scripts));
-    const scriptsList =
-        scripts
-            .reduce(
-                (acc, script) => {
-                    if (!script.isInline) {
-                        const attrs = getAttributesRaw(script.script);
-                        Object.assign(
-                            attrs, {[augment('type')]: script.mime, ...attrs});
-                        const jAttrs = refitTags(joinAttrs(
-                            attrs,
-                            {src: useOSIndependentPath(script.scriptName)}));
-                        return acc + `<script ${jAttrs}></script>` +
-                            '\n\t';
-                    } else {
-                        return acc + '<script src="/' +
-                            useOSIndependentPath(path.join(
-                                script.shortPath, script.scriptName)) +
-                            '" type="' + script.mime + '" defer></script>\n\t';
-                    }
-                },
-                '\n\t')
-            .trimEnd();
+    let scriptsList          = '\n\t';
+    let scriptLoaderPriority = 0;
+    for (const script of scripts) {
+        const order = `order={${++scriptLoaderPriority}}`;
+        if (!script.isInline) {
+            const attrs = await getAttributes(script.script);
+            Object.assign(attrs, {[augment('type')]: script.mime, ...attrs});
+            const jAttrs = refitTags(joinRAttrs(
+                attrs,
+                {[augment('src')]: useOSIndependentPath(script.scriptName)}));
+            scriptsList += `<script ${jAttrs} ${order}></script>` +
+                '\n\t';
+        } else {
+            scriptsList += '<script src="/' +
+                useOSIndependentPath(
+                               path.join(script.shortPath, script.scriptName)) +
+                '" type="' + script.mime + '" ' + order +
+                ' defer={true}></script>\n\t';
+        }
+    }
 
-    const {rootB} = resourcePath;
-    assert(isDefined(rootB));
-
-    await emplaceImpl(SCRIPT_INC_TAG, rootB, rootB, scriptsList);
-    await removeHooks('*', resourcePath);
+    await emplaceImpl(PAGE_SCRIPT_TAG, pagePath, pagePath, scriptsList);
 }
 
 function deriveNameFrom(filePath, opts) {
@@ -1012,6 +999,30 @@ function joinAttrs(attrs, extras /* nullable */) {
         .trim();
 }
 
+function joinRAttrs(attrs, extras /* nullable */) {
+    assert(isDefined(attrs) && isObject(attrs));
+
+    return Object.entries({...attrs, ...extras})
+        .reduce(
+            (acc, [k, v]) => {
+                if (isEmpty(v)) {
+                    return acc + k + '={true} ';
+                }
+
+                // The attribute value is not closed.
+                if (v.startsWith('{') && !v.endsWith('}')) {
+                    // TODO: Report error
+                    assert(false);
+                }
+
+                const prefix = acc + k + '=';
+                return prefix + (v.startsWith('{') ? v : '"' + v) +
+                    (v.endsWith('}') ? ' ' : '" ');
+            },
+            '')
+        .trim();
+}
+
 async function duplicatePageTemplate(pagePath, resourcePath) {
     const {pageB} = resourcePath;
     assert(isDefined(pageB));
@@ -1021,30 +1032,7 @@ async function duplicatePageTemplate(pagePath, resourcePath) {
     const newPageFullPath = path.join(pageB, pagePath);
 
     await fsp.mkdir(path.dirname(newPageFullPath), {recursive: true});
-
     await fsp.copyFile(refPageFullPath, newPageFullPath);
-}
-
-async function emplaceHooks(scripts, pagePath, resourcePath) {
-    const {pageB, srcB} = resourcePath;
-    assert(isDefined(pageB));
-    assert(isDefined(srcB));
-
-    const scriptsList  = useOSIndependentPath(scripts.reduce(
-         (acc, script) => acc + '\'' + script.scriptName + '\'' +
-             ',\n\t',
-         '\n\t'));
-    const hooksPath    = path.join(srcB, 'hooks/useScript');
-    const pageFullPath = path.join(pageB, pagePath);
-    const pageFullDir  = path.dirname(pageFullPath);
-    const relHookIncl =
-        useOSIndependentPath(path.relative(pageFullDir, hooksPath));
-    const hook =
-        `\n\tconst [loadedScripts, error] = useScript([${scriptsList}]);`;
-    const include = `\nimport useScript from './${relHookIncl}';`;
-
-    await emplaceImpl(HOOKS_TAG, pageFullPath, pageFullPath, hook);
-    await emplaceImpl(HOOKS_INC_TAG, pageFullPath, pageFullPath, include);
 }
 
 async function removeHooks(hooks, resourcePath) {
@@ -1089,25 +1077,25 @@ async function emplaceRootAttrs(node, resourcePath) {
     }
 }
 
-async function emplaceLinks(links, processingParams) {
-    return await emplaceLinksOrMetasImpl(
-        links, true /* isLink */, processingParams);
+async function emplaceLinks(links, pagePath) {
+    return await emplaceLinksOrMetasImpl(links, true /* isLink */, pagePath);
 }
 
-async function emplaceMetas(metas, processingParams) {
+async function emplaceMetas(metas, pagePath) {
     if (isEmpty(metas))
         metas.push({charset: 'utf-8'});
 
-    return await emplaceLinksOrMetasImpl(
-        metas, false /* isLink */, processingParams);
+    return await emplaceLinksOrMetasImpl(metas, false /* isLink */, pagePath);
 }
 
-async function emplaceLinksOrMetasImpl(linksOrMetas, isLink, resourcePath) {
-    const tag       = isLink ? '<link ' : '<meta ';
-    const finalList = await overrideSet(
-        isLink ? linkTags : metaTags, linksOrMetas, resourcePath);
+async function emplaceLinksOrMetasImpl(linksOrMetas, isLink, pagePath) {
+    assert(isDefined(pagePath));
+
+    const tag = isLink ? '<link ' : '<meta ';
+    //   const     finalList =
+    //       await overrideSet(isLink ? linkTags : metaTags, linksOrMetas);
     const stringLinksOrMetas =
-        finalList
+        linksOrMetas
             .map(current => {
                 /*
                  * Delete the `original` tag so that it won't
@@ -1119,14 +1107,11 @@ async function emplaceLinksOrMetasImpl(linksOrMetas, isLink, resourcePath) {
             })
             .reduce((cur, linkOrMeta) => cur + linkOrMeta + '\n', '\n');
 
-    const {rootB} = resourcePath;
     await emplaceImpl(
-        isLink ? LINK_TAG : META_TAG, rootB, rootB, stringLinksOrMetas);
-
-    return finalList;
+        isLink ? LINK_TAG : META_TAG, pagePath, pagePath, stringLinksOrMetas);
 }
 
-async function overrideSet(standard, given, resourcePath) {
+async function overrideSet(standard, given) {
     logger.info('overrideSet(): given --- ', given, ', standard: ', standard);
     const visibilityMap = new Map();
     const finalSet      = Object.assign([], standard);
@@ -1195,14 +1180,13 @@ async function updateFaviconAddress(newFavicon, oldFavicon, resourcePath) {
     return true;
 }
 
-async function emplaceTitle(title, processingParams) {
-    const {rootB} = processingParams;
-    assert(isDefined(rootB));
+async function emplaceTitle(title, pagePath) {
+    assert(isDefined(pagePath));
 
-    await emplaceImpl(TITLE_TAG, rootB, rootB, title);
+    await emplaceImpl(TITLE_TAG, pagePath, pagePath, title);
 }
 
-async function emplaceStyle(content, resourcePath) {
+async function emplaceStyles(content, resourcePath) {
     const {style, styleB, appB, scriptB} = resourcePath;
     assert(isDefined(style));
     assert(isDefined(styleB));
@@ -1298,14 +1282,15 @@ async function relinkPages(pages, resourcePath) {
             html: fixAnchorRoutes(page.html, page, allLinks, routeMap)
         });
 
-        if (isEmpty(allLinks)) {
-            continue;
-        }
-
-        const pageFullPath = path.join(pageB, page.info.path);
-        const importDecl   = strJoin(
-              `import { useNavigate } from "react-router-dom";`,
-              `@{${REACT_IMPORT_TAG}}`, '\n');
+        const loaderFullPath =
+            path.join(pageB, '..', 'loader', 'component-loader');
+        const pageFullPath       = path.join(pageB, page.info.path);
+        const loaderRelativePath = useOSIndependentPath(
+            './' + path.relative(path.dirname(pageFullPath), loaderFullPath));
+        const importDecl = strJoin(
+            `import { useNavigate } from "react-router-dom";`,
+            `import Loader from "${loaderRelativePath}";`,
+            `@{${REACT_IMPORT_TAG}}`, '\n');
         const navDecl = `\nconst navigate = useNavigate();`;
         const navFun  = strJoin(
              `const navigateTo = (event, page) => {`, `event.preventDefault();`,
@@ -1408,6 +1393,13 @@ function getPageRoute(page) {
     return [pageUrl, realname];
 }
 
+function getPagePath(page, resourcePath) {
+    const {pageB} = resourcePath;
+    assert(isDefined(pageB));
+
+    return path.join(pageB, page);
+}
+
 async function emplaceHTML(pages, resourcePath) {
     const {pageB} = resourcePath;
     assert(isDefined(pageB));
@@ -1417,7 +1409,8 @@ async function emplaceHTML(pages, resourcePath) {
         const pageFullPath = path.join(pageB, info.path);
 
         await emplaceImpl(
-            PAGE_TAG, pageFullPath, pageFullPath, useJSXStyleComments(html));
+            PAGE_CONTENT_TAG, pageFullPath, pageFullPath,
+            useJSXStyleComments(html));
         await emplaceImpl(PAGE_NAME_TAG, pageFullPath, pageFullPath, info.name);
     }
 }
@@ -1490,14 +1483,14 @@ async function updateLinksFromLinksContent(
             continue;
 
         const linkFullPath = path.join(publicB, link.href);
+        /*\
+         * Don't bloat the resolvedLinks cache,
+         * we won't add binary files and
+         * absolute URLs to it.
+        \*/
         if (!fs.existsSync(linkFullPath) || isBinary(linkFullPath))
             continue;
 
-        /*\
-         * Don't bloat the resolvedLinks cache,
-         * we won't add know binary files and
-         * absolute URLs to it.
-        \*/
         if (resolvedLinks[link.href]) {
             continue;
         }
@@ -2463,11 +2456,49 @@ async function extractAllScripts(doc) {
             isInline: !src,
             mime: mime,
             scriptName: src ?? `sc-${id}.${extension}`,
-            content: script.innerHTML.trim()
+            content: wrapWithAnon(script.innerHTML.trim())
         });
     }
 
     return scripts;
+}
+
+function wrapWithAnon(script) {
+    return `(function() {
+                ${script}
+            })();`;
+}
+
+async function wrapScriptsWithAnon(scripts, resourcePath) {
+    const {publicB} = resourcePath;
+    assert(isDefined(publicB));
+
+    for (const script of scripts) {
+        if (isAbsoluteURI(script.scriptName) || script.isInline) {
+            continue;
+        }
+
+        const filePath = path.join(publicB, script.scriptName);
+        if (!fs.existsSync(filePath)) {
+            continue;
+        }
+
+        await wrapContentWithAnon(filePath);
+    }
+}
+
+async function wrapContentWithAnon(file) {
+    const content = (await fsp.readFile(file)).toString();
+    if (isAlreadyWrappedWithAnnon(content)) {
+        return;
+    }
+    await fsp.writeFile(file, wrapWithAnon(content));
+}
+
+function isAlreadyWrappedWithAnnon(content) {
+    const prefix     = '(function() {';
+    const startPiece = content.slice(0, prefix.length);
+    return prefix == startPiece;
 }
 
 /*
@@ -2557,7 +2588,7 @@ function modifyAttributes(node, attributes) {
 /*\
  * For namespaced attributes such
  * as SVG's xmlns:prefix, return
- * true.
+ * the match.
 \*/
 function isNamespaced(attribute) {
     return attribute.match(/^([a-z-]+):([a-z-]+)$/);
@@ -2569,7 +2600,7 @@ function augment(attr) {
 
 function modifyEscapeIntent(node, attribute, attributes) {
     const value = attributes[attribute];
-    if (value.startsWith('{') && value[1] !== '{' && lastEntry(value) === '}') {
+    if (value.startsWith('{') && value[1] !== '{' && value.endsWith('}')) {
         const mod = '`' + value + '`';
         node.removeAttribute(attribute);
         node.setAttribute(attribute, mod);
@@ -2841,8 +2872,6 @@ function exports() {
             removeTemplates,
             finalizeWriter,
             buildPathTemplateFrom,
-            addScripts,
-            emplaceInRoot,
             deriveNameFrom,
             capitalize,
             strJoin,
@@ -2854,7 +2883,6 @@ function exports() {
             pageIsInStream,
             joinAttrs,
             duplicatePageTemplate,
-            emplaceHooks,
             removeHooks,
             deleteFilesMatch,
             emplaceRootAttrs,
@@ -2863,7 +2891,7 @@ function exports() {
             overrideSet,
             updateFaviconAddress,
             emplaceTitle,
-            emplaceStyle,
+            emplaceStyles,
             fixupWebpack,
             bt,
             relinkPages,
