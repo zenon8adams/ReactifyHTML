@@ -1,6 +1,6 @@
-import {cv, expect, path} from './test_setup.js';
+import {cv, expect, path, PROJECT_NAME} from './test_setup.js';
 
-describe('ReactifyHTML::Existence', () => {
+describe(`${PROJECT_NAME}::Existence`, () => {
     it('should check for argument existence', () => {
         expect(cv.isEmpty('.')).to.equal(false);
         expect(cv.isEmpty('')).to.equal(!cv.isNotEmpty(''));

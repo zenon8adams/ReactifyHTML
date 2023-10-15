@@ -1,6 +1,6 @@
-import {cv, expect, path} from './test_setup.js';
+import {cv, expect, path, PROJECT_NAME} from './test_setup.js';
 
-describe('ReactifyHTML::comments', () => {
+describe(`${PROJECT_NAME}::comments`, () => {
     it('should use replace Js comments with JSX style comments', () => {
         const expr = `<script>\n
               const collection = [1, 2, 3];\n

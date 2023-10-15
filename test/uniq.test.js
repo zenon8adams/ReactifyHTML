@@ -1,7 +1,6 @@
-import {cv, expect, path} from './test_setup.js';
+import {cv, expect, path, PROJECT_NAME} from './test_setup.js';
 
-
-describe('ReactifyHTML::uniq', () => {
+describe(`${PROJECT_NAME}::uniq`, () => {
     it('should return uniq entries in arguments', () => {
         const one     = [{Name: 'X', Year: 2013}],
               another = [{Name: 'Y', Year: 2013}],

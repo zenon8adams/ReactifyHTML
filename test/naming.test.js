@@ -1,6 +1,6 @@
-import {cv, expect, path} from './test_setup.js';
+import {cv, expect, path, PROJECT_NAME} from './test_setup.js';
 
-describe('ReactifyHTML::naming', () => {
+describe(`${PROJECT_NAME}::naming`, () => {
     it('should generate name from path', () => {
         expect(cv.deriveNameFrom('pages/my-home-page.js', {
             suffix: 'Page'

@@ -1,6 +1,6 @@
-import {cv, expect, path} from './test_setup.js';
+import {cv, expect, path, PROJECT_NAME} from './test_setup.js';
 
-describe('ReactifyHTML::generator', () => {
+describe(`${PROJECT_NAME}::generator`, () => {
     it('should generate at most n digits', () => {
         expect(cv.randomCounter(4)).to.have.lengthOf(4);
         expect(cv.randomCounter(8)).to.have.lengthOf(8);

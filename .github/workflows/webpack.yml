@@ -41,7 +41,7 @@ jobs:
         run: pnpm test
       
       - name: Generate template (Index)
-        run: node index.js
+        run: node index.js examples/
 
       - name: Echo Logs (Index)
         if: always()

@@ -1,24 +1,28 @@
 {
-  "name": "ReactifyHTML",
-  "type": "module",
-  "dependencies": {
-    "fs-extra": "^11.1.1",
-    "istextorbinary": "^6.0.0",
-    "jsdom": "^22.1.0",
-    "mime-db": "^1.52.0",
-    "rimraf": "^5.0.1",
-    "tar": "^6.2.0",
-    "winston": "^3.10.0",
-    "yauzl": "^2.10.0"
-  },
-  "packageManager": "^pnpm@8.8.0",
-  "devDependencies": {
-    "chai": "^4.3.10",
-    "cross-env": "^7.0.3",
-    "esm": "^3.2.25",
-    "mocha": "^10.2.0"
-  },
-  "scripts": {
-    "test": "cross-env NODE_ENV=test mocha"
-  }
+    "name": "ReactifyHTML",
+    "version": "0.9.0",
+    "description":
+        "Convert plain HTML templates into React components effortlessly with ReactifyHTML.",
+    "type": "module",
+    "dependencies": {
+        "commander": "^11.1.0",
+        "fs-extra": "^11.1.1",
+        "istextorbinary": "^6.0.0",
+        "jsdom": "^22.1.0",
+        "mime-db": "^1.52.0",
+        "rimraf": "^5.0.1",
+        "tar": "^6.2.0",
+        "winston": "^3.10.0",
+        "yauzl": "^2.10.0"
+    },
+    "packageManager": "^pnpm@8.8.0",
+    "devDependencies": {
+        "chai": "^4.3.10",
+        "cross-env": "^7.0.3",
+        "esm": "^3.2.25",
+        "mocha": "^10.2.0"
+    },
+    "scripts": {
+        "test": "cross-env NODE_ENV=test mocha --exit"
+    }
 }

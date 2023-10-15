@@ -1,6 +1,6 @@
-import {cv, expect, path} from './test_setup.js';
+import {cv, expect, path, PROJECT_NAME} from './test_setup.js';
 
-describe('ReactifyHTML::RegularExpressionSort', () => {
+describe(`${PROJECT_NAME}::RegularExpressionSort`, () => {
     it('should sort `re` matches by `index` in descending order', () => {
         const re      = /([a-z]+)/gm;
         const expr    = 'split this string into substrings';
