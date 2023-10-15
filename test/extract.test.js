@@ -1,6 +1,6 @@
-import {cv, expect, path} from './test_setup.js';
+import {cv, expect, path, PROJECT_NAME} from './test_setup.js';
 
-describe('ReactifyHTML::extract', () => {
+describe(`${PROJECT_NAME}::extract`, () => {
     it('should extract description from meta tags', () => {
         const metasMock = [
             {name: 'description', content: 'This is the required text'},

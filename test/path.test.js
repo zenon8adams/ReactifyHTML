@@ -2,7 +2,7 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import {rimraf} from 'rimraf';
 
-import {cv, expect, path} from './test_setup.js';
+import {cv, expect, path, PROJECT_NAME} from './test_setup.js';
 
 const sessionID    = '0x01729012';
 const temporaryDir = path.join(os.tmpdir(), 'ReactifyHTML', sessionID);
@@ -10,7 +10,7 @@ before(async () => {
     await fs.mkdir(temporaryDir, {recursive: true});
 });
 
-describe('ReactifyHTML::path', () => {
+describe(`${PROJECT_NAME}::path`, () => {
     it('should return reference to previous directory', () => {
         expect(cv.bt(path.join('usr', 'local', 'bin')))
             .to.equal(path.join('usr', 'local'));

@@ -1,6 +1,6 @@
-import {cv, expect, path} from './test_setup.js';
+import {cv, expect, path, PROJECT_NAME} from './test_setup.js';
 
-describe('ReactifyHTML::selfClosingTags', () => {
+describe(`${PROJECT_NAME}::selfClosingTags`, () => {
     it('should close self unterminated html tags', () => {
         const expr     = '<input type="text" name="dob">';
         const expected = expr.slice(0, -1) + '/>';

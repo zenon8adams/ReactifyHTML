@@ -1,6 +1,6 @@
-import {cv, expect, path} from './test_setup.js';
+import {cv, expect, path, PROJECT_NAME} from './test_setup.js';
 
-describe('ReactifyHTML::StringEdit', () => {
+describe(`${PROJECT_NAME}::StringEdit`, () => {
     it('should remove quote from maybe quoted string', () => {
         expect(cv.unQuote('"This"')).to.equal('This');
         expect(cv.unQuote('This')).to.equal('This');

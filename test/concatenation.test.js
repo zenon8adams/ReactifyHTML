@@ -1,6 +1,6 @@
-import {cv, expect, path} from './test_setup.js';
+import {cv, expect, path, PROJECT_NAME} from './test_setup.js';
 
-describe('ReactifyHTML::concatenation', () => {
+describe(`${PROJECT_NAME}::concatenation`, () => {
     it('should join arguments to make one entity', () => {
         expect(cv.strJoin('reac', 'ti', 'fy', 'H', 'TML', ' '))
             .to.equal('reac ti fy H TML');

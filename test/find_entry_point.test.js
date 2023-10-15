@@ -1,6 +1,6 @@
-import {cv, expect, path} from './test_setup.js';
+import {cv, expect, path, PROJECT_NAME} from './test_setup.js';
 
-describe('ReactifyHTML::FindEntryPoint', () => {
+describe(`${PROJECT_NAME}::FindEntryPoint`, () => {
     const file = path.join('examples', 'index');
     it('should give path to the landing page', async () => {
         expect(path.parse(await cv.resolveLandingPage(cv.strJoin(file, '.zip')))

@@ -1,6 +1,6 @@
-import {cv, expect, path} from './test_setup.js';
+import {cv, expect, path, PROJECT_NAME} from './test_setup.js';
 
-describe('ReactifyHTML::Types', () => {
+describe(`${PROJECT_NAME}::Types`, () => {
     it('should check the type of argument', () => {
         expect(cv.isArray([])).to.equal(true);
         expect(cv.isArray(0)).to.equal(false);

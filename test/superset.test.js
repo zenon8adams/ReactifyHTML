@@ -1,6 +1,6 @@
-import {cv, expect, path} from './test_setup.js';
+import {cv, expect, path, PROJECT_NAME} from './test_setup.js';
 
-describe('ReactifyHTML::superset', () => {
+describe(`${PROJECT_NAME}::superset`, () => {
     it('should check if first argument contains all of second argument', () => {
         const base = [
             'The', 'quick', 'brown', 'fox', 'jumps', 'over', 'the', 'lazy',

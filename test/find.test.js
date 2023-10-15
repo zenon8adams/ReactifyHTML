@@ -1,6 +1,6 @@
-import {cv, expect, path} from './test_setup.js';
+import {cv, expect, path, PROJECT_NAME} from './test_setup.js';
 
-describe('ReactifyHTML::find', () => {
+describe(`${PROJECT_NAME}::find`, () => {
     it('should search for element occurrence', () => {
         const expr            = 'It should be know that it is important...';
         const lastOccurrence  = expr.lastIndexOf('it');
