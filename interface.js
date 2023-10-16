@@ -381,6 +381,10 @@ export async function generateAllPages(config) {
         process.exit(1);
     }
 
+    // Clear the indexer output
+    // Move down; clear the line; move up;
+    // Move cursor to beginning.
+    process.stdout.write('\x1B[1B\x1B[2K\x1B[1A\x1B[10000D');
     await cleanTemporaryFiles();
 
     process.exit(0);
@@ -702,6 +706,7 @@ async function downloadProject(url, original, redirectDepth) {
     assert(scheme === 'http' || scheme === 'https');
     const protocol     = [http, https].at(scheme === 'https');
     const downloadPath = path.join(temporaryDir, base);
+    let   totalBytes = 0, receivedBytes = 0, drawn = 0;
     return new Promise((resolve, reject) => {
                protocol.get(url, (response) => {
                    const {statusCode} = response;
@@ -720,9 +725,15 @@ async function downloadProject(url, original, redirectDepth) {
                        response.resume();
                        return;
                    }
-
+                   totalBytes =
+                       parseInt(response.headers['content-length'] ?? '-1');
                    const stream = fs.createWriteStream(downloadPath);
                    response.pipe(stream);
+                   response.on('data', (chunk) => {
+                       receivedBytes += chunk.length;
+                       drawn = displayProgress(
+                           'Downloading', receivedBytes, totalBytes, drawn);
+                   });
                    stream.on('finish', () => {
                        stream.close();
                        resolve({path: downloadPath});
@@ -741,6 +752,28 @@ async function downloadProject(url, original, redirectDepth) {
                       return resolveLandingPage(next.path);
                   }
               });
+}
+
+function displayProgress(prefix, received, total, progress) {
+    const LOADING_INDICATORS = 25;
+    if (total == -1) {
+        process.stdout.write(`\x1B[2K\x1B[10000D${prefix}...`);
+        return progress;
+    } else {
+        if (progress === 0) {
+            process.stdout.write(
+                `\x1B[2K${prefix}... [` +
+                ' '.repeat(LOADING_INDICATORS) + ']\x1B[' +
+                (LOADING_INDICATORS + 1) + 'D');
+        }
+        const nBars =
+            Math.ceil((received * LOADING_INDICATORS / total)) - progress;
+        if (nBars > 0) {
+            process.stdout.write('#'.repeat(nBars));
+        }
+
+        return nBars + progress;
+    }
 }
 
 async function removeTemplates(resourcePath) {
@@ -1745,31 +1778,52 @@ async function retrieveAssetsFromGlobalDirectory(pageSourceFile, assetsList) {
                     providedAsset, {...assetBundle, realpath: realpath});
                 if (withSimilarOrigin.length === 1) {
                     const selected = withSimilarOrigin[0];
-                    console.info(
-                        '\nThe file found at', selected.realpath,
-                        '\nhas been selected as a match for the file:', base,
-                        isNotNull(selected.version) ? ', with version:' : '',
-                        selected.version ?? '');
+                    const shortpath =
+                        path.relative(mainSourceDir, selected.realpath);
+                    // Clear current line;
+                    // Move cursor down;
+                    // Move cursor to start of line;
+                    // Clear the line;
+                    // Move cursor up;
+                    // Move cursor to start of line;
+                    process.stdout.write(
+                        '\x1B[2K' +
+                        'The file found at ' + shortpath +
+                        '\x1B[1B\x1B[10000D\x1B[2Khas been selected as a match for the file: ' +
+                        base +
+                        (isNotNull(selected.version) ? ', with version: ' :
+                                                       '') +
+                        (selected.version ?? '') + '\x1B[1A\x1B[10000D');
                     requestedAssetsResolvedPath[asset] = withSimilarOrigin[0];
                 } else {
                     fileNotFound = true;
                 }
             } else {
-                console.info(
-                    '\nThe file found at', providedAsset.realpath,
-                    '\nhas been selected as a match for the file:', base,
-                    isNotNull(providedAsset.version) ? ', with version:' : '',
-                    providedAsset.version ?? '');
+                const shortpath =
+                    path.relative(mainSourceDir, providedAsset.realpath);
+                process.stdout.write(
+                    '\x1B[2K' +
+                    'The file found at ' + shortpath +
+                    '\x1B[1B\x1B[10000D\x1B[2Khas been selected as a match for the file: ' +
+                    base +
+                    (isNotNull(providedAsset.version) ? ', with version: ' :
+                                                        '') +
+                    (providedAsset.version ?? '') + '\x1B[1A\x1B[10000D');
                 requestedAssetsResolvedPath[asset] = providedAsset;
             }
         } else {
             fileNotFound = true;
         }
 
-        if (/*!isSelfReference(pageSourceFile, base) && */ fileNotFound) {
-            console.info(
-                '\nCannot find asset by the name:', '`' + base + '`',
-                'its resolution is left to you');
+        if (fileNotFound) {
+            // Clear current line;
+            // Move cursor to start of current line;
+            process.stdout.write(
+                '\x1B[2K' +
+                'Cannot find asset by the name:' +
+                '`' + base + '`' +
+                'its resolution is left to you' +
+                '\x1B[10000D');
         }
     }
 
@@ -2790,8 +2844,12 @@ function isURI(link) {
     }
 }
 
+function isWindowsOS() {
+    return os.platform() == 'win32';
+}
+
 function isWindowsPath(link) {
-    return os.platform() === 'win32' && link.match(/^[a-zA-Z]:\\/);
+    return isWindowsOS() && link.match(/^[a-zA-Z]:\\/);
 }
 
 function lastEntry(list) {
@@ -2878,6 +2936,8 @@ export function exports() {
             removeTemplates,
             finalizeWriter,
             buildPathTemplateFrom,
+            emplaceScripts,
+            emplaceInPage,
             deriveNameFrom,
             capitalize,
             strJoin,
@@ -2888,6 +2948,7 @@ export function exports() {
             removeAbsoluteRef,
             pageIsInStream,
             joinAttrs,
+            joinRAttrs,
             duplicatePageTemplate,
             removeHooks,
             deleteFilesMatch,
@@ -2901,16 +2962,21 @@ export function exports() {
             fixupWebpack,
             bt,
             relinkPages,
+            getMatchingRoute,
             fixAnchorRoutes,
             fixEmptyLinks,
             emplaceApp,
             getPageRoute,
+            getPagePath,
             emplaceHTML,
             useJSXStyleComments,
+            editComment,
             emplaceImpl,
             clip,
             updateLinksFromLinksContent,
             updateStyleLinks,
+            updateInlineStyleAssets,
+            resolveEmbeddedAssets,
             unQuote,
             updateMissingLinks,
             copyResolvedAssetsToOutputDirectory,
@@ -2919,6 +2985,8 @@ export function exports() {
             removeBackLinks,
             retrieveAssetsFromGlobalDirectory,
             filterAssetsByRelativity,
+            numberOfComponents,
+            numberOfBacklinkPrefix,
             removeRelativeHyperlinks,
             resolveGlobalAssetsPath,
             indexDirectory,
@@ -2941,7 +3009,11 @@ export function exports() {
             extractTitle,
             extractLinks,
             extractMetas,
+            extractPropsImpl,
             extractAllPageLinks,
+            stripQueryAndFragment,
+            isImplicitReference,
+            augmentImplicitReference,
             getIndexer,
             extractStyles,
             escapeAllJSXQuotes,
@@ -2951,6 +3023,10 @@ export function exports() {
             matchClosely,
             extractComments,
             extractAllScripts,
+            wrapWithAnon,
+            wrapScriptsWithAnon,
+            wrapContentWithAnon,
+            isAlreadyWrappedWithAnnon,
             adaptToHTML,
             randomCounter,
             refitTags,
@@ -2963,6 +3039,7 @@ export function exports() {
             getAttributes,
             formatStyle,
             sortIndexDesc,
+            isFunction,
             isArray,
             isString,
             isBoolean,
@@ -2978,12 +3055,13 @@ export function exports() {
             isNull,
             isNotNull,
             isAbsoluteURI,
+            isURI,
             isWindowsPath,
             lastEntry,
             fullPathOf,
             closeSelfClosingTags,
             expandMatches,
-            shiftByAttrs,
+            shiftByAttrs
         };
     }
 
