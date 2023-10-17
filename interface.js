@@ -122,7 +122,7 @@ modifyLock(
 const PAGE_ROUTE_TAG = 'PAGE_ROUTE';
 const PAGE_NAME_TAG  = 'PAGE_NAME';
 
-modifyLock(PAGE_NAME_TAG);
+modifyLock(PAGE_ROUTE_TAG, PAGE_NAME_TAG);
 
 // --- Replacement Tags --- //
 
@@ -412,7 +412,6 @@ async function resolveLandingPage(providedPath) {
         if (isAbsoluteURI(providedPath)) {
             return await downloadProject(providedPath);
         }
-
 
         const functions = {
             [Decompressor.Zip]: unzipProject,
@@ -756,6 +755,11 @@ async function downloadProject(url, original, redirectDepth) {
                        if (err.code === 'ETIMEDOUT') {
                            reject(new Error('Error: Connection timed out'));
                            return;
+                       } else if (err.code === 'EAI_AGAIN') {
+                           reject(new Error(strJoin(
+                               'Error: Unable to connect to host.',
+                               'Check your internet conectivity and try again.',
+                               '\n')));
                        }
                        reject(err);
                    });
@@ -767,7 +771,7 @@ async function downloadProject(url, original, redirectDepth) {
                           next.redirectUrl, url, next.depth + 1);
                   } else if (next.depth > MAX_REDIRECT) {
                       return Promise.reject(
-                          new Error('Maxium redirect reached'));
+                          new Error('Maximum redirection reached'));
                   } else {
                       return resolveLandingPage(next.path);
                   }
@@ -775,18 +779,30 @@ async function downloadProject(url, original, redirectDepth) {
 }
 
 function displayProgress(prefix, progress, total, received) {
+    const {useAsciiDisplay} = converterConfig;
+    assert(isDefined(useAsciiDisplay) && isBoolean(useAsciiDisplay));
+
     const LOADING_INDICATORS = 25;
-    const WAITING_INDICATORS = 3;
+    const MOTION_INTERVAL    = 70;
     const SPACING            = 4;
+
     if (total == -1) {
-        const value  = (progress + 1) % WAITING_INDICATORS + 1;
+        if (progress > 1 && progress % MOTION_INTERVAL !== 0) {
+            return ++progress;
+        }
+        const value   = (progress / MOTION_INTERVAL + 1) % LOADING_INDICATORS;
+        const pointer = useAsciiDisplay ? '*-*-*' : '◉·●·◉';
+        let   indicators =
+            pointer + '-'.repeat(LOADING_INDICATORS - pointer.length);
+        indicators =
+            indicators.slice(-1 * value) + indicators.slice(0, -1 * value);
+        indicators   = '[' + indicators + ']';
         const suffix = isDefined(received) ?
-            ' '.repeat(WAITING_INDICATORS + SPACING - value + 1) +
-                humanReadableFormOf(received) :
+            ' '.repeat(SPACING) + humanReadableFormOf(received) :
             '';
         process.stdout.write(
-            `\x1B[2K${prefix}` +
-            '.'.repeat(value) + suffix + '\x1B[10000D');
+            `\x1B[2K${prefix}... ` + indicators + suffix + '\x1B[10000D');
+
         return ++progress;
     } else {
         const suffix =
@@ -807,6 +823,7 @@ function displayProgress(prefix, progress, total, received) {
         return nBars + progress;
     }
 }
+
 
 function humanReadableFormOf(bytes) {
     const units = ['B', 'KB', 'MB', 'GB', 'TB'];
@@ -1180,7 +1197,7 @@ async function emplaceLinksOrMetasImpl(linksOrMetas, isLink, pagePath) {
         linksOrMetas
             .map(current => {
                 /*
-                 * Delete the `original` tag so that it won't
+                 * Delete the `original` property so that it won't
                  * reflect as an attribute.
                  */
                 delete current.original;
@@ -1326,6 +1343,12 @@ async function relinkPages(pages, resourcePath) {
             page.isLanding ? page.href : path.join(page.rela, page.href),
             page.route));
 
+    /*\
+     * Match all href content of all anchor tags.
+     * Example:
+     * <a href="https://www.google.com"></a>
+     * The matched text will be `https://www.google.com`.
+    \*/
     const re = new RegExp(
         '<a[^]+?href[^=]*=[^`\'"]*((?:"[^"\\\\]*' +
             '(?:\\\\.[^"\\\\]*)*"|\'[^\'\\\\]*(?:\\\\.' +
@@ -1416,8 +1439,11 @@ function getMatchingRoute(page, match, routeMap) {
 }
 
 function fixAnchorRoutes(html, page, matches, routeMap) {
-    const isWeakPolicy = converterConfig.weakReplacement;
-    const hKey         = 'href=';
+    const {weakReplacement} = converterConfig;
+    assert(isDefined(weakReplacement) && isBoolean(weakReplacement));
+    const isWeakPolicy = weakReplacement;
+
+    const hKey = 'href=';
     for (const match of matches) {
         const ihref         = html.slice(match.index).indexOf(hKey);
         const start         = match.index + ihref + hKey.length;
@@ -1435,12 +1461,16 @@ function fixAnchorRoutes(html, page, matches, routeMap) {
 }
 
 function fixEmptyLinks(html, page, matches) {
+    const {weakReplacement} = converterConfig;
+    assert(isDefined(weakReplacement) && isBoolean(weakReplacement));
+    const isWeakPolicy = weakReplacement;
+
     for (const match of matches) {
         const start =
             match.index + match[0].length - 2 /* Subtract the empty quote */;
-        const end = match.index + match[0].length;
-        const repl =
-            '"javascript:void(0);" onClick={(e) => e.preventDefault()}';
+        const end  = match.index + match[0].length;
+        const link = isWeakPolicy ? '' : 'javascript:void(0);';
+        const repl = `"${link}" onClick={(e) => e.preventDefault()}`;
 
         html = html.substring(0, start) + repl + html.substring(end);
     }
@@ -1469,9 +1499,7 @@ async function emplaceApp(pages, resourcePath) {
             allRoutes, `<Route`, `path={Router.${declName}}`,
             `element={<${declName} />} />\n\t\t`, ' ');
 
-
         routesIncl = routesIncl + `\nimport ${declName} from '${pageIncl}';`;
-
         Object.assign(page, {...page, route: pageUrl});
     }
 
@@ -1818,7 +1846,6 @@ async function retrieveAssetsFromGlobalDirectory(pageSourceFile, assetsList) {
         return requestedAssetsResolvedPath;
     }
 
-
     for (const assetBundle of assetsList) {
         const asset                                      = assetBundle.value;
         const assetInfo                                  = parseFile(asset);
@@ -1947,7 +1974,8 @@ async function resolveGlobalAssetsPath(pageSourceFile, excludePattern) {
                 }
                 return [
                     providedPath,
-                    await indexDirectory(providedPath, indexer.re, {}, 0)
+                    await indexDirectory(
+                        providedPath, indexer.re, converterConfig.searchDepth)
                 ];
             } else {
                 throw new Error('Error: Invalid path provided');
@@ -1961,12 +1989,16 @@ async function resolveGlobalAssetsPath(pageSourceFile, excludePattern) {
         const providedPath = mainSourceDir;
         return [
             providedPath,
-            await indexDirectory(providedPath, excludePattern, {}, 0)
+            await indexDirectory(
+                providedPath, excludePattern, converterConfig.searchDepth)
         ];
     }
 }
 
 async function indexDirectory(globalAssetsPath, excludePattern, maxDepth) {
+    assert(isDefined(maxDepth) && isNumber(maxDepth));
+    maxDepth = maxDepth == -1 ? Infinity : maxDepth;
+
     const originalPath = globalAssetsPath;
     if (indexDirectory[globalAssetsPath]) {
         return indexDirectory[globalAssetsPath];
