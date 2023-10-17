@@ -555,6 +555,7 @@ async function decompressZipOrGzipImpl(archivePath, decompressor) {
 async function decompressGzipImpl(archivePath) {
     let seenRootDir = false;
     let rootDir     = '';
+    let progress    = 0;
     return new Promise(async (resolve, reject) => {
         const readStream  = fs.createReadStream(archivePath);
         const unzipStream = zlib.createGunzip();
@@ -563,6 +564,7 @@ async function decompressGzipImpl(archivePath) {
             onentry: (entry) => {
                 [rootDir, seenRootDir] =
                     checkIfActuallyRoot(rootDir, entry.path);
+                progress = displayProgress('Extracting', progress, -1);
             }
         }));
 
@@ -577,6 +579,7 @@ async function decompressZipImpl(archivePath) {
     let handleCount = 0;
     let rootDir     = '';
     let seenRootDir = false;
+    let progress    = 0;
     return new Promise((resolve, reject) => {
         yauzl.open(archivePath, {lazyEntries: true}, async (err, zipfile) => {
             if (err) {
@@ -605,6 +608,7 @@ async function decompressZipImpl(archivePath) {
                 [rootDir, seenRootDir] =
                     checkIfActuallyRoot(rootDir, entry.fileName);
 
+                progress = displayProgress('Extracting', progress, -1);
                 logger.info('Processing:', destPath);
                 if (/\/$/.test(entry.fileName)) {
                     // directory file names end with '/'
@@ -706,39 +710,56 @@ async function downloadProject(url, original, redirectDepth) {
     assert(scheme === 'http' || scheme === 'https');
     const protocol     = [http, https].at(scheme === 'https');
     const downloadPath = path.join(temporaryDir, base);
-    let   totalBytes = 0, receivedBytes = 0, drawn = 0;
+    let   totalBytes = 0, receivedBytes = 0, progress = 0;
     return new Promise((resolve, reject) => {
-               protocol.get(url, (response) => {
-                   const {statusCode} = response;
-                   // We have been redirected
-                   if (statusCode === 302) {
-                       resolve({
-                           redirectUrl: response.headers.location,
-                           depth: redirectDepth ?? 1
-                       });
-                       response.resume();
-                       return;
-                   } else if (statusCode !== 200) {
-                       reject(new Error(strJoin(
-                           `Request Failed`, `Status Code: ${statusCode}`,
-                           '\n')));
-                       response.resume();
-                       return;
-                   }
-                   totalBytes =
-                       parseInt(response.headers['content-length'] ?? '-1');
-                   const stream = fs.createWriteStream(downloadPath);
-                   response.pipe(stream);
-                   response.on('data', (chunk) => {
-                       receivedBytes += chunk.length;
-                       drawn = displayProgress(
-                           'Downloading', receivedBytes, totalBytes, drawn);
+               protocol
+                   .get(
+                       url,
+                       (response) => {
+                           const {statusCode} = response;
+                           // We have been redirected
+                           if (statusCode === 302) {
+                               resolve({
+                                   redirectUrl: response.headers.location,
+                                   depth: redirectDepth ?? 1
+                               });
+                               response.resume();
+                               return;
+                           } else if (statusCode !== 200) {
+                               reject(new Error(
+                                   'Error: Request failed with status code: ' +
+                                   statusCode));
+                               response.resume();
+                               return;
+                           }
+                           totalBytes = parseInt(
+                               response.headers['content-length'] ?? '-1');
+                           const stream = fs.createWriteStream(downloadPath);
+                           response.pipe(stream);
+                           response.on('data', (chunk) => {
+                               receivedBytes += chunk.length;
+                               progress = displayProgress(
+                                   'Downloading', progress, totalBytes,
+                                   receivedBytes);
+                           });
+                           stream.on('finish', () => {
+                               stream.close();
+                               resolve({path: downloadPath});
+                           });
+                           stream.on('error', (err) => {
+                               reject(err);
+                           });
+                           response.on('error', (err) => {
+                               reject(err);
+                           });
+                       })
+                   .on('error', (err) => {
+                       if (err.code === 'ETIMEDOUT') {
+                           reject(new Error('Error: Connection timed out'));
+                           return;
+                       }
+                       reject(err);
                    });
-                   stream.on('finish', () => {
-                       stream.close();
-                       resolve({path: downloadPath});
-                   });
-               });
            })
         .then(/* If we are redirected, recurse with the new path */
               (next) => {
@@ -754,26 +775,47 @@ async function downloadProject(url, original, redirectDepth) {
               });
 }
 
-function displayProgress(prefix, received, total, progress) {
+function displayProgress(prefix, progress, total, received) {
     const LOADING_INDICATORS = 25;
+    const WAITING_INDICATORS = 3;
+    const SPACING            = 4;
     if (total == -1) {
-        process.stdout.write(`\x1B[2K\x1B[10000D${prefix}...`);
-        return progress;
+        const value  = (progress + 1) % WAITING_INDICATORS + 1;
+        const suffix = isDefined(received) ?
+            ' '.repeat(WAITING_INDICATORS + SPACING - value + 1) +
+                humanReadableFormOf(received) :
+            '';
+        process.stdout.write(
+            `\x1B[2K${prefix}` +
+            '.'.repeat(value) + suffix + '\x1B[10000D');
+        return ++progress;
     } else {
-        if (progress === 0) {
-            process.stdout.write(
-                `\x1B[2K${prefix}... [` +
-                ' '.repeat(LOADING_INDICATORS) + ']\x1B[' +
-                (LOADING_INDICATORS + 1) + 'D');
-        }
+        const suffix =
+            humanReadableFormOf(received) + ' / ' + humanReadableFormOf(total);
         const nBars =
             Math.ceil((received * LOADING_INDICATORS / total)) - progress;
-        if (nBars > 0) {
-            process.stdout.write('#'.repeat(nBars));
-        }
+        // Clean current line;
+        // Write progress indicator `#`;
+        // Write the remaining to be filled ` `;
+        // Write the suffix `1MB / 10MB`;
+        // Move cursor to start of line;
+        process.stdout.write(
+            `\x1B[2K${prefix}... [` +
+            '#'.repeat(progress + nBars) +
+            ' '.repeat(LOADING_INDICATORS - progress - nBars) + '] ' + suffix +
+            '\x1B[10000D');
 
         return nBars + progress;
     }
+}
+
+function humanReadableFormOf(bytes) {
+    const units = ['B', 'KB', 'MB', 'GB', 'TB'];
+    let   i;
+    for (i = 0; bytes >= 1024 && i < units.length - 1; i++) {
+        bytes /= 1024;
+    }
+    return `${bytes.toFixed(2)}${units[i]}`;
 }
 
 async function removeTemplates(resourcePath) {
