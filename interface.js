@@ -119,11 +119,10 @@ modifyLock(
     FAVICON_DIR_TAG);
 
 // Inject the meta description and title into App.jsx
-const PAGE_INFO_TAG = 'CASE_PAGE_INFO';
+const PAGE_ROUTE_TAG = 'PAGE_ROUTE';
+const PAGE_NAME_TAG  = 'PAGE_NAME';
 
-const PAGE_NAME_TAG = 'PAGE_NAME';
-
-modifyLock(PAGE_INFO_TAG, PAGE_NAME_TAG);
+modifyLock(PAGE_NAME_TAG);
 
 // --- Replacement Tags --- //
 
@@ -880,7 +879,6 @@ async function finalizeWriter(pages, resourcePath) {
         ASSETS_PRESENT_TAG, webpackB, webpackB,
         assetIsPresent ? 'true' : 'false');
 
-    await emplaceImpl(PAGE_INFO_TAG, appB, appB, '');
     await emplaceImpl(ROUTES_TAG, appB, appB, '');
 }
 
@@ -1335,6 +1333,12 @@ async function relinkPages(pages, resourcePath) {
         'gm');
 
     const empty_re = new RegExp('<a[^]+?href[^=]*=(""|\'\'|``)', 'gm');
+
+    const loaderFullPath = path.join(pageB, '..', 'loader', 'component-loader');
+    const navigatorFullPath = path.join(pageB, '..', 'navigator', 'navigate');
+    const routerFullPath    = path.join(pageB, '..', 'navigator', 'routes');
+    const routerFile        = routerFullPath + '.js';
+
     for (const page of pages) {
         const {html} = page;
         assert(html);
@@ -1366,26 +1370,38 @@ async function relinkPages(pages, resourcePath) {
             html: fixAnchorRoutes(page.html, page, allLinks, routeMap)
         });
 
-        const loaderFullPath =
-            path.join(pageB, '..', 'loader', 'component-loader');
-        const pageFullPath       = path.join(pageB, page.info.path);
-        const loaderRelativePath = useOSIndependentPath(
-            './' + path.relative(path.dirname(pageFullPath), loaderFullPath));
+        const pageFullPath = path.join(pageB, page.info.path);
+        const loaderRelativePath =
+            relativePathImpl(pageFullPath, loaderFullPath);
+        const navigatorRelativePath =
+            relativePathImpl(pageFullPath, navigatorFullPath);
+        const routerRelativePath =
+            relativePathImpl(pageFullPath, routerFullPath);
+
         const importDecl = strJoin(
-            `import { useNavigate } from "react-router-dom";`,
+            `import { navigateTo } from "${navigatorRelativePath}";`,
+            `import Router from "${routerRelativePath}";`,
             `import Loader from "${loaderRelativePath}";`,
             `@{${REACT_IMPORT_TAG}}`, '\n');
-        const navDecl = `\nconst navigate = useNavigate();`;
-        const navFun  = strJoin(
-             `const navigateTo = (event, page) => {`, `event.preventDefault();`,
-             `navigate(page);`, `}`, '\t\n');
-        const useImportDecl =
-            strJoin(navDecl, navFun, `@{${USE_IMPORT_TAG}}`, '\n');
+        const navDecl       = `\nconst navigate = useNavigate();`;
+        const useImportDecl = strJoin(navDecl, `@{${USE_IMPORT_TAG}}`, '\n');
+
+        const [pageUrl, realname] = getPageRoute(page);
+        const declName            = deriveNameFrom(realname, {suffix: 'Page'});
+        const routeDecl =
+            strJoin(`${declName}: "${pageUrl}",`, `@{${PAGE_ROUTE_TAG}}`, '\n');
 
         await emplaceImpl(
             REACT_IMPORT_TAG, pageFullPath, pageFullPath, importDecl);
         await emplaceImpl(
             USE_IMPORT_TAG, pageFullPath, pageFullPath, useImportDecl);
+        await emplaceImpl(PAGE_ROUTE_TAG, routerFile, routerFile, routeDecl);
+    }
+    await emplaceImpl(PAGE_ROUTE_TAG, routerFile, routerFile, '');
+
+    function relativePathImpl(onePath, otherPath) {
+        return useOSIndependentPath(
+            './' + path.relative(path.dirname(onePath), otherPath));
     }
 }
 
@@ -1403,12 +1419,14 @@ function fixAnchorRoutes(html, page, matches, routeMap) {
     const isWeakPolicy = converterConfig.weakReplacement;
     const hKey         = 'href=';
     for (const match of matches) {
-        const ihref = html.slice(match.index).indexOf(hKey);
-        const start = match.index + ihref + hKey.length;
-        const end   = match.index + match[0].length;
-        const route = getMatchingRoute(page, match[1], routeMap);
-        const link  = isWeakPolicy ? match[1] : 'javascript:void(0);';
-        const repl  = `"${link}" onClick={(e) => navigateTo(e, '${route}')}`;
+        const ihref         = html.slice(match.index).indexOf(hKey);
+        const start         = match.index + ihref + hKey.length;
+        const end           = match.index + match[0].length;
+        const route         = getMatchingRoute(page, match[1], routeMap);
+        const routeConstant = `Router.${page.info.name}`;
+        const link          = isWeakPolicy ? match[1] : 'javascript:void(0);';
+        const repl =
+            `"${link}" onClick={(e) => navigateTo(e, ${routeConstant})}`;
 
         html = html.substring(0, start) + repl + html.substring(end);
     }
@@ -1438,9 +1456,8 @@ async function emplaceApp(pages, resourcePath) {
     assert(isArray(pages));
     assert(isString(appB));
 
-    let allPageCases = '';
-    let allRoutes    = '';
-    let routesIncl   = '';
+    let allRoutes  = '';
+    let routesIncl = '';
     for (const page of pages) {
         const {name, title, description} = page.info;
         const [pageUrl, realname]        = getPageRoute(page);
@@ -1448,12 +1465,8 @@ async function emplaceApp(pages, resourcePath) {
         const pageIncl = useOSIndependentPath('./pages/' + realname);
         const declName = deriveNameFrom(realname, {suffix: 'Page'});
 
-        allPageCases = strJoin(
-            allPageCases, `case '${pageUrl}':\n`, `\ttitle = '${title}';\n`,
-            `\tmetaDescription = '${description}';\n`, `\tbreak;\n`, '\t');
-
         allRoutes = strJoin(
-            allRoutes, `<Route`, `path="${pageUrl}"`,
+            allRoutes, `<Route`, `path={Router.${declName}}`,
             `element={<${declName} />} />\n\t\t`, ' ');
 
 
@@ -1462,7 +1475,6 @@ async function emplaceApp(pages, resourcePath) {
         Object.assign(page, {...page, route: pageUrl});
     }
 
-    await emplaceImpl(PAGE_INFO_TAG, appB, appB, allPageCases.trimRight());
     await emplaceImpl(ROUTES_TAG, appB, appB, allRoutes.trimRight());
     await emplaceImpl(ROUTES_INC_TAG, appB, appB, routesIncl.trimRight());
 }
