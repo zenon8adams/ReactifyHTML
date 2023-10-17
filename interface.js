@@ -381,6 +381,10 @@ export async function generateAllPages(config) {
         process.exit(1);
     }
 
+    // Clear the indexer output
+    // Move down; clear the line; move up;
+    // Move cursor to beginning.
+    process.stdout.write('\x1B[1B\x1B[2K\x1B[1A\x1B[10000D');
     await cleanTemporaryFiles();
 
     process.exit(0);
@@ -551,6 +555,7 @@ async function decompressZipOrGzipImpl(archivePath, decompressor) {
 async function decompressGzipImpl(archivePath) {
     let seenRootDir = false;
     let rootDir     = '';
+    let progress    = 0;
     return new Promise(async (resolve, reject) => {
         const readStream  = fs.createReadStream(archivePath);
         const unzipStream = zlib.createGunzip();
@@ -559,6 +564,7 @@ async function decompressGzipImpl(archivePath) {
             onentry: (entry) => {
                 [rootDir, seenRootDir] =
                     checkIfActuallyRoot(rootDir, entry.path);
+                progress = displayProgress('Extracting', progress, -1);
             }
         }));
 
@@ -573,6 +579,7 @@ async function decompressZipImpl(archivePath) {
     let handleCount = 0;
     let rootDir     = '';
     let seenRootDir = false;
+    let progress    = 0;
     return new Promise((resolve, reject) => {
         yauzl.open(archivePath, {lazyEntries: true}, async (err, zipfile) => {
             if (err) {
@@ -601,6 +608,7 @@ async function decompressZipImpl(archivePath) {
                 [rootDir, seenRootDir] =
                     checkIfActuallyRoot(rootDir, entry.fileName);
 
+                progress = displayProgress('Extracting', progress, -1);
                 logger.info('Processing:', destPath);
                 if (/\/$/.test(entry.fileName)) {
                     // directory file names end with '/'
@@ -702,32 +710,56 @@ async function downloadProject(url, original, redirectDepth) {
     assert(scheme === 'http' || scheme === 'https');
     const protocol     = [http, https].at(scheme === 'https');
     const downloadPath = path.join(temporaryDir, base);
+    let   totalBytes = 0, receivedBytes = 0, progress = 0;
     return new Promise((resolve, reject) => {
-               protocol.get(url, (response) => {
-                   const {statusCode} = response;
-                   // We have been redirected
-                   if (statusCode === 302) {
-                       resolve({
-                           redirectUrl: response.headers.location,
-                           depth: redirectDepth ?? 1
-                       });
-                       response.resume();
-                       return;
-                   } else if (statusCode !== 200) {
-                       reject(new Error(strJoin(
-                           `Request Failed`, `Status Code: ${statusCode}`,
-                           '\n')));
-                       response.resume();
-                       return;
-                   }
-
-                   const stream = fs.createWriteStream(downloadPath);
-                   response.pipe(stream);
-                   stream.on('finish', () => {
-                       stream.close();
-                       resolve({path: downloadPath});
+               protocol
+                   .get(
+                       url,
+                       (response) => {
+                           const {statusCode} = response;
+                           // We have been redirected
+                           if (statusCode === 302) {
+                               resolve({
+                                   redirectUrl: response.headers.location,
+                                   depth: redirectDepth ?? 1
+                               });
+                               response.resume();
+                               return;
+                           } else if (statusCode !== 200) {
+                               reject(new Error(
+                                   'Error: Request failed with status code: ' +
+                                   statusCode));
+                               response.resume();
+                               return;
+                           }
+                           totalBytes = parseInt(
+                               response.headers['content-length'] ?? '-1');
+                           const stream = fs.createWriteStream(downloadPath);
+                           response.pipe(stream);
+                           response.on('data', (chunk) => {
+                               receivedBytes += chunk.length;
+                               progress = displayProgress(
+                                   'Downloading', progress, totalBytes,
+                                   receivedBytes);
+                           });
+                           stream.on('finish', () => {
+                               stream.close();
+                               resolve({path: downloadPath});
+                           });
+                           stream.on('error', (err) => {
+                               reject(err);
+                           });
+                           response.on('error', (err) => {
+                               reject(err);
+                           });
+                       })
+                   .on('error', (err) => {
+                       if (err.code === 'ETIMEDOUT') {
+                           reject(new Error('Error: Connection timed out'));
+                           return;
+                       }
+                       reject(err);
                    });
-               });
            })
         .then(/* If we are redirected, recurse with the new path */
               (next) => {
@@ -741,6 +773,49 @@ async function downloadProject(url, original, redirectDepth) {
                       return resolveLandingPage(next.path);
                   }
               });
+}
+
+function displayProgress(prefix, progress, total, received) {
+    const LOADING_INDICATORS = 25;
+    const WAITING_INDICATORS = 3;
+    const SPACING            = 4;
+    if (total == -1) {
+        const value  = (progress + 1) % WAITING_INDICATORS + 1;
+        const suffix = isDefined(received) ?
+            ' '.repeat(WAITING_INDICATORS + SPACING - value + 1) +
+                humanReadableFormOf(received) :
+            '';
+        process.stdout.write(
+            `\x1B[2K${prefix}` +
+            '.'.repeat(value) + suffix + '\x1B[10000D');
+        return ++progress;
+    } else {
+        const suffix =
+            humanReadableFormOf(received) + ' / ' + humanReadableFormOf(total);
+        const nBars =
+            Math.ceil((received * LOADING_INDICATORS / total)) - progress;
+        // Clean current line;
+        // Write progress indicator `#`;
+        // Write the remaining to be filled ` `;
+        // Write the suffix `1MB / 10MB`;
+        // Move cursor to start of line;
+        process.stdout.write(
+            `\x1B[2K${prefix}... [` +
+            '#'.repeat(progress + nBars) +
+            ' '.repeat(LOADING_INDICATORS - progress - nBars) + '] ' + suffix +
+            '\x1B[10000D');
+
+        return nBars + progress;
+    }
+}
+
+function humanReadableFormOf(bytes) {
+    const units = ['B', 'KB', 'MB', 'GB', 'TB'];
+    let   i;
+    for (i = 0; bytes >= 1024 && i < units.length - 1; i++) {
+        bytes /= 1024;
+    }
+    return `${bytes.toFixed(2)}${units[i]}`;
 }
 
 async function removeTemplates(resourcePath) {
@@ -1745,31 +1820,52 @@ async function retrieveAssetsFromGlobalDirectory(pageSourceFile, assetsList) {
                     providedAsset, {...assetBundle, realpath: realpath});
                 if (withSimilarOrigin.length === 1) {
                     const selected = withSimilarOrigin[0];
-                    console.info(
-                        '\nThe file found at', selected.realpath,
-                        '\nhas been selected as a match for the file:', base,
-                        isNotNull(selected.version) ? ', with version:' : '',
-                        selected.version ?? '');
+                    const shortpath =
+                        path.relative(mainSourceDir, selected.realpath);
+                    // Clear current line;
+                    // Move cursor down;
+                    // Move cursor to start of line;
+                    // Clear the line;
+                    // Move cursor up;
+                    // Move cursor to start of line;
+                    process.stdout.write(
+                        '\x1B[2K' +
+                        'The file found at ' + shortpath +
+                        '\x1B[1B\x1B[10000D\x1B[2Khas been selected as a match for the file: ' +
+                        base +
+                        (isNotNull(selected.version) ? ', with version: ' :
+                                                       '') +
+                        (selected.version ?? '') + '\x1B[1A\x1B[10000D');
                     requestedAssetsResolvedPath[asset] = withSimilarOrigin[0];
                 } else {
                     fileNotFound = true;
                 }
             } else {
-                console.info(
-                    '\nThe file found at', providedAsset.realpath,
-                    '\nhas been selected as a match for the file:', base,
-                    isNotNull(providedAsset.version) ? ', with version:' : '',
-                    providedAsset.version ?? '');
+                const shortpath =
+                    path.relative(mainSourceDir, providedAsset.realpath);
+                process.stdout.write(
+                    '\x1B[2K' +
+                    'The file found at ' + shortpath +
+                    '\x1B[1B\x1B[10000D\x1B[2Khas been selected as a match for the file: ' +
+                    base +
+                    (isNotNull(providedAsset.version) ? ', with version: ' :
+                                                        '') +
+                    (providedAsset.version ?? '') + '\x1B[1A\x1B[10000D');
                 requestedAssetsResolvedPath[asset] = providedAsset;
             }
         } else {
             fileNotFound = true;
         }
 
-        if (/*!isSelfReference(pageSourceFile, base) && */ fileNotFound) {
-            console.info(
-                '\nCannot find asset by the name:', '`' + base + '`',
-                'its resolution is left to you');
+        if (fileNotFound) {
+            // Clear current line;
+            // Move cursor to start of current line;
+            process.stdout.write(
+                '\x1B[2K' +
+                'Cannot find asset by the name:' +
+                '`' + base + '`' +
+                'its resolution is left to you' +
+                '\x1B[10000D');
         }
     }
 
@@ -2790,8 +2886,12 @@ function isURI(link) {
     }
 }
 
+function isWindowsOS() {
+    return os.platform() == 'win32';
+}
+
 function isWindowsPath(link) {
-    return os.platform() === 'win32' && link.match(/^[a-zA-Z]:\\/);
+    return isWindowsOS() && link.match(/^[a-zA-Z]:\\/);
 }
 
 function lastEntry(list) {
@@ -2878,6 +2978,8 @@ export function exports() {
             removeTemplates,
             finalizeWriter,
             buildPathTemplateFrom,
+            emplaceScripts,
+            emplaceInPage,
             deriveNameFrom,
             capitalize,
             strJoin,
@@ -2888,6 +2990,7 @@ export function exports() {
             removeAbsoluteRef,
             pageIsInStream,
             joinAttrs,
+            joinRAttrs,
             duplicatePageTemplate,
             removeHooks,
             deleteFilesMatch,
@@ -2901,16 +3004,21 @@ export function exports() {
             fixupWebpack,
             bt,
             relinkPages,
+            getMatchingRoute,
             fixAnchorRoutes,
             fixEmptyLinks,
             emplaceApp,
             getPageRoute,
+            getPagePath,
             emplaceHTML,
             useJSXStyleComments,
+            editComment,
             emplaceImpl,
             clip,
             updateLinksFromLinksContent,
             updateStyleLinks,
+            updateInlineStyleAssets,
+            resolveEmbeddedAssets,
             unQuote,
             updateMissingLinks,
             copyResolvedAssetsToOutputDirectory,
@@ -2919,6 +3027,8 @@ export function exports() {
             removeBackLinks,
             retrieveAssetsFromGlobalDirectory,
             filterAssetsByRelativity,
+            numberOfComponents,
+            numberOfBacklinkPrefix,
             removeRelativeHyperlinks,
             resolveGlobalAssetsPath,
             indexDirectory,
@@ -2941,7 +3051,11 @@ export function exports() {
             extractTitle,
             extractLinks,
             extractMetas,
+            extractPropsImpl,
             extractAllPageLinks,
+            stripQueryAndFragment,
+            isImplicitReference,
+            augmentImplicitReference,
             getIndexer,
             extractStyles,
             escapeAllJSXQuotes,
@@ -2951,6 +3065,10 @@ export function exports() {
             matchClosely,
             extractComments,
             extractAllScripts,
+            wrapWithAnon,
+            wrapScriptsWithAnon,
+            wrapContentWithAnon,
+            isAlreadyWrappedWithAnnon,
             adaptToHTML,
             randomCounter,
             refitTags,
@@ -2963,6 +3081,7 @@ export function exports() {
             getAttributes,
             formatStyle,
             sortIndexDesc,
+            isFunction,
             isArray,
             isString,
             isBoolean,
@@ -2978,12 +3097,13 @@ export function exports() {
             isNull,
             isNotNull,
             isAbsoluteURI,
+            isURI,
             isWindowsPath,
             lastEntry,
             fullPathOf,
             closeSelfClosingTags,
             expandMatches,
-            shiftByAttrs,
+            shiftByAttrs
         };
     }
 

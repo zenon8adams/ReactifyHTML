@@ -1,6 +1,6 @@
 {
     "name": "ReactifyHTML",
-    "version": "0.9.0",
+    "version": "0.9.0-beta",
     "description":
         "Convert plain HTML templates into React components effortlessly with ReactifyHTML.",
     "type": "module",

@@ -23,7 +23,7 @@
  *   DEALINGS IN THE SOFTWARE.
 \*/
 'use strict';
-import {Command} from 'commander';
+import {Command, Option} from 'commander';
 import {generateAllPages, strJoin} from './interface.js';
 import {
     PROJECT_NAME,
@@ -32,38 +32,57 @@ import {
 } from './project-info.js';
 // --- Command Line --- //
 
-const converterConfig = {};
+const converterConfig = {
+    searchDepth: -1,
+    deduceAssetsFromBasePath: true,
+    usePathRelativeIndex: true,
+    archive: true,
+    entryPoint: 'index.html',
+    weakReplacement: false
+};
+
+function parseBoolean(str) {
+    return str === 'true' || +str > 0;
+}
 
 const program = new Command();
 program.name(PROJECT_NAME)
     .description(PROJECT_DESCRIPTION)
     .version(PROJECT_VERSION);
 program
-    .option(
-        '-s, --search-depth <number>',
-        strJoin('set search depth when indexing assets', '\n'), -1)
-    .option(
-        '-d, --deduce-assets-from-base-path',
-        strJoin(
-            'the entry point should be deduced',
-            'from the base directory given', '\n'),
-        true)
-    .option(
-        '-u, --use-path-relative-index',
-        strJoin(
-            'assets should retain their structure', 'during asset resolution',
-            '\n'),
-        true)
-    .option('-a, --archive', 'compress output project', true)
+    .addOption(new Option(
+                   '-s, --search-depth <number>',
+                   strJoin('set search depth when indexing assets', '\n'))
+                   .default(-1, 'infinite(-1)')
+                   .argParser(parseInt))
+    .addOption(new Option(
+                   '-d, --deduce-assets-from-base-path <boolean>',
+                   strJoin(
+                       'the entry point should be deduced',
+                       'from the base directory given', '\n'))
+                   .default(true)
+                   .argParser(parseBoolean))
+    .addOption(new Option(
+                   '-u, --use-path-relative-index <boolean>',
+                   strJoin(
+                       'assets should retain their structure',
+                       'during asset resolution', '\n'))
+                   .default(true)
+                   .argParser(parseBoolean))
+    .addOption(new Option('-a, --archive <boolean>', 'compress output project')
+                   .default(true)
+                   .argParser(parseBoolean))
     .option(
         '-e, --entry-point <string>', 'set entry point to start processing',
         'index.html')
-    .option(
-        '-w, --weak-replacement',
-        strJoin(
-            'determines if the href attribute of anchor',
-            ' tags can be safely replaced with ', '`javascript:void(0);', '\n'),
-        false)
+    .addOption(new Option(
+                   '-w, --weak-replacement <boolean>',
+                   strJoin(
+                       'determines if the href attribute of anchor',
+                       'tags can be safely replaced with',
+                       '`javascript:void(0);', '\n'))
+                   .default(false)
+                   .argParser(parseBoolean))
     .arguments('<path|archive|url>')
     .action(
         initial => Object.assign(
