@@ -32,16 +32,7 @@ import {
 } from './project-info.js';
 // --- Command Line --- //
 
-const converterConfig = {
-    searchDepth: -1,
-    deduceAssetsFromBasePath: true,
-    usePathRelativeIndex: true,
-    archive: true,
-    entryPoint: 'index.html',
-    subdirectory: '.',
-    weakReplacement: false,
-    useAsciiDisplay: false
-};
+const converterConfig = {};
 
 function parseBoolean(str) {
     return str === 'true' || +str > 0;

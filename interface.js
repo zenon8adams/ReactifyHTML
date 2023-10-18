@@ -180,8 +180,23 @@ function logWrapper() {
 // --- Logger --- //
 
 // This is the projects root directory
-let   mainSourceDir;
-const converterConfig = {};
+let mainSourceDir;
+/*\
+ * The converterConfig was moved
+ * here so as not to make the assertions
+ * in the functions trigger during testing
+ * phase.
+\*/
+const converterConfig = {
+    searchDepth: -1,
+    deduceAssetsFromBasePath: true,
+    usePathRelativeIndex: true,
+    archive: true,
+    entryPoint: 'index.html',
+    subdirectory: '.',
+    weakReplacement: false,
+    useAsciiDisplay: false
+};
 
 export async function generateAllPages(config) {
     let allPageMetas = [], allStyles = '', allLinks = [], allScripts = [],
@@ -334,8 +349,8 @@ export async function generateAllPages(config) {
                 \*/
 
                 await emplaceTitle(pageTitle, pagePath);
-                await emplaceMetas(pageMetas, pagePath);
-                await emplaceLinks(pageLinks, pagePath);
+                await emplaceMetas(pageMetas, pagePath, resourcePath);
+                await emplaceLinks(pageLinks, pagePath, resourcePath);
                 await emplaceScripts(scripts, pagePath, resourcePath);
 
                 // Queue newly fetched pages to the stream.
@@ -386,6 +401,10 @@ export async function generateAllPages(config) {
     process.stdout.write('\x1B[1B\x1B[2K\x1B[1A\x1B[10000D');
     await cleanTemporaryFiles();
 
+    process.stdout.write(
+        'Success! Generated projects has been written to `' + BUILD_DIR +
+        '` directory\n');
+
     process.exit(0);
 }
 
@@ -427,7 +446,7 @@ async function resolveLandingPage(providedPath) {
                               .split('|')
                               .map(ext => ({[ext]: functions[dc]})))
                 .flat()
-                // Sort the listings by extension length in ascending order
+                // Sort the listings by extension length in decending order
                 // so that longer extension names are matched first.
                 .sort((one, other) => {
                     const oneLen   = Object.keys(one)[0].length;
@@ -443,8 +462,8 @@ async function resolveLandingPage(providedPath) {
 
         // Match the longest extension name that can be derived from the
         // basename
-        const ext =
-            Object.keys(associations).find(ex => base.lastIndexOf(ex) !== -1);
+        const ext = Object.keys(associations)
+                        .find(ex => providedPath.slice(-ex.length) === ex);
         let selector = associations[ext];
 
         if (isNotDefined(selector)) {
@@ -486,19 +505,19 @@ async function tryDecodeFromMagic(providedPath, lookup) {
 
 async function readFile(filepath, maxLength) {
     return new Promise(async (resolve, reject) => {
-        fs.open(filepath, 'r', (o_err, fd) => {
-            if (o_err) {
-                reject(o_err);
+        fs.open(filepath, 'r', (oErr, fd) => {
+            if (oErr) {
+                reject(oErr);
                 return;
             }
 
             const buffer = new Uint8Array(maxLength);
-            fs.read(fd, buffer, 0, maxLength, 0, (r_err, n_read, buffer) => {
-                if (r_err) {
-                    reject(r_err);
+            fs.read(fd, buffer, 0, maxLength, 0, (rErr, read, buffer) => {
+                if (rErr) {
+                    reject(rErr);
                     return;
                 }
-                resolve([n_read, buffer]);
+                resolve([read, buffer]);
             });
         });
     });
@@ -532,6 +551,9 @@ async function decompressZipOrGzipImpl(archivePath, decompressor) {
         decompressor === Decompressor.Zip ||
         decompressor === Decompressor.Gzip);
 
+    const {subdirectory} = converterConfig;
+    assert(isDefined(subdirectory) && isString(subdirectory));
+
     const decomps  = Object.values(Decompressor);
     const rootPath = await[decompressZipImpl, decompressGzipImpl].at(
         decomps.indexOf(decompressor))(archivePath);
@@ -541,7 +563,22 @@ async function decompressZipOrGzipImpl(archivePath, decompressor) {
 
     const info = fs.statSync(filePath);
     if (info.isDirectory()) {
-        return findIndexFile(filePath);
+        /*\
+         * If a subdirectory argument is provided,
+         * we have to find the entry point in the
+         * subdirectory provided.
+        \*/
+        const extendedFilePath    = path.join(filePath, subdirectory);
+        const extendedIsDirectory = fs.existsSync(extendedFilePath) &&
+            fs.statSync(extendedFilePath).isDirectory();
+        if (extendedFilePath === filePath || extendedIsDirectory) {
+            return findIndexFile(extendedFilePath);
+        } else {
+            const shortpath = path.relative(temporaryDir, extendedFilePath);
+            throw new Error(strJoin(
+                'Error: provided subdirectory`', shortpath,
+                '` is not a valid directory.', ''));
+        }
     } else {
         // For nested archives such as .tar.gz
         // or previously resolved path cyling
@@ -551,33 +588,77 @@ async function decompressZipOrGzipImpl(archivePath, decompressor) {
 }
 
 async function decompressGzipImpl(archivePath) {
-    let seenRootDir = false;
-    let rootDir     = '';
-    let progress    = 0;
+    let seenRootDir   = false;
+    let rootDir       = '';
+    let progress      = 0;
+    let receivedBytes = 0;
     return new Promise(async (resolve, reject) => {
         const readStream  = fs.createReadStream(archivePath);
         const unzipStream = zlib.createGunzip();
-        unzipStream.pipe(tar.extract({
-            cwd: temporaryDir,
-            onentry: (entry) => {
-                [rootDir, seenRootDir] =
-                    checkIfActuallyRoot(rootDir, entry.path);
-                progress = displayProgress('Extracting', progress, -1);
-            }
-        }));
+        const ext         = extensionsOf(archivePath, 2);
+        /*
+         * `node-tar` cannot handle recursively compressed
+         * archives (e.g .zip.gz). Give `node-tar` only
+         * archives it can process then use the builtin
+         * zlib facility to deflate .gz archive.
+         */
+        if (ext.indexOf('.tar.gz') !== -1 || ext.indexOf('.tgz') !== -1) {
+            unzipStream.pipe(tar.extract({
+                cwd: temporaryDir,
+                onentry: (entry) => {
+                    [rootDir, seenRootDir] =
+                        checkIfActuallyRoot(rootDir, entry.path);
+                }
+            }));
+            unzipStream.on('finish', async () => {
+                resolve(seenRootDir ? rootDir : './');
+            });
+        } else {
+            const ext = path.extname(archivePath);
+            assert(ext === '.gz');
+            const writeFile   = archivePath.slice(0, -ext.length);
+            const writeStream = fs.createWriteStream(writeFile);
+            unzipStream.pipe(writeStream);
+            writeStream.on('error', reject);
+            unzipStream.on('finish', () => {
+                resolve(path.relative(temporaryDir, writeFile));
+            });
+        }
 
         readStream.pipe(unzipStream);
+        readStream.on('data', (received) => {
+            receivedBytes += received.length;
+            progress =
+                displayProgress('Extracting', progress, -1, receivedBytes);
+        });
         readStream.on('error', reject);
         unzipStream.on('error', reject);
-        unzipStream.on('finish', () => resolve(seenRootDir ? rootDir : './'));
     })
 };
 
+function extensionsOf(file, level) {
+    assert(isDefined(file) && isString(file));
+    assert(isNumber(level) && level >= 1);
+
+    let jExt = '';
+    for (let i = 0; i < level; ++i) {
+        const {ext} = path.parse(file);
+        if (isEmpty(ext)) {
+            return jExt;
+        }
+        jExt = ext + jExt;
+        file = file.slice(0, -ext.length);
+    }
+
+    return jExt;
+}
+
 async function decompressZipImpl(archivePath) {
-    let handleCount = 0;
-    let rootDir     = '';
-    let seenRootDir = false;
-    let progress    = 0;
+    let handleCount   = 0;
+    let rootDir       = '';
+    let seenRootDir   = false;
+    let progress      = 0;
+    let receivedBytes = 0;
     return new Promise((resolve, reject) => {
         yauzl.open(archivePath, {lazyEntries: true}, async (err, zipfile) => {
             if (err) {
@@ -606,7 +687,6 @@ async function decompressZipImpl(archivePath) {
                 [rootDir, seenRootDir] =
                     checkIfActuallyRoot(rootDir, entry.fileName);
 
-                progress = displayProgress('Extracting', progress, -1);
                 logger.info('Processing:', destPath);
                 if (/\/$/.test(entry.fileName)) {
                     // directory file names end with '/'
@@ -637,6 +717,11 @@ async function decompressZipImpl(archivePath) {
                         incrementHandleCount();
                         writeStream.on('close', decrementHandleCount);
                         readStream.pipe(filter).pipe(writeStream);
+                        readStream.on('data', (received) => {
+                            receivedBytes += received.length;
+                            progress = displayProgress(
+                                'Extracting', progress, -1, receivedBytes);
+                        });
                     });
                 }
             });
@@ -659,7 +744,12 @@ async function decompressZipImpl(archivePath) {
 \*/
 function checkIfActuallyRoot(maybeRootDir, readPath) {
     if (isEmpty(maybeRootDir)) {
-        maybeRootDir = readPath;
+        if (numberOfComponents(readPath) > 1) {
+            const root   = readPath.slice(0, nextOf(0, readPath, path.sep));
+            maybeRootDir = root;
+        } else {
+            maybeRootDir = readPath;
+        }
     }
 
     if (path.relative(maybeRootDir, readPath).startsWith('..')) {
@@ -670,7 +760,17 @@ function checkIfActuallyRoot(maybeRootDir, readPath) {
 }
 
 async function findIndexFile(providedPath) {
-    async function findIndexFileImpl(initialPath) {
+    const {entryPoint} = converterConfig;
+    assert(isDefined(entryPoint) && isString(entryPoint));
+
+    return await findFile(entryPoint, providedPath);
+}
+
+async function findFile(filename, providedPath) {
+    assert(isDefined(filename));
+    assert(filename === '*' || isString(filename));
+
+    async function findFileImpl(initialPath) {
         const directoryQueue    = [];
         const directoryIterator = await fsp.readdir(initialPath);
         for (const file of directoryIterator) {
@@ -678,7 +778,10 @@ async function findIndexFile(providedPath) {
             const stat        = fs.statSync(filePath);
             const isDirectory = stat.isDirectory(filePath);
 
-            if (file === converterConfig.entryPoint) {
+            // If we found the file or user
+            // didn't specify any particular file,
+            // return the first file found.
+            if (filename === '*' || file === filename) {
                 return filePath;
             } else if (isDirectory) {
                 directoryQueue.push(filePath);
@@ -690,14 +793,14 @@ async function findIndexFile(providedPath) {
          * next nodes to explore in a queue.
         \*/
         for (const directory of directoryQueue) {
-            const file = await findIndexFileImpl(directory);
+            const file = await findFileImpl(directory);
             if (isDefined(file)) {
                 return file;
             }
         }
     }
 
-    const file = await findIndexFileImpl(providedPath);
+    const file = await findFileImpl(providedPath);
 
     return file;
 }
@@ -826,10 +929,11 @@ function displayProgress(prefix, progress, total, received) {
 
 
 function humanReadableFormOf(bytes) {
-    const units = ['B', 'KB', 'MB', 'GB', 'TB'];
+    const BYTE_SCALING = 1024;
+    const units        = ['B', 'KB', 'MB', 'GB', 'TB'];
     let   i;
-    for (i = 0; bytes >= 1024 && i < units.length - 1; i++) {
-        bytes /= 1024;
+    for (i = 0; bytes >= BYTE_SCALING && i < units.length - 1; i++) {
+        bytes /= BYTE_SCALING;
     }
     return `${bytes.toFixed(2)}${units[i]}`;
 }
@@ -1176,25 +1280,28 @@ async function emplaceRootAttrs(node, resourcePath) {
     }
 }
 
-async function emplaceLinks(links, pagePath) {
-    return await emplaceLinksOrMetasImpl(links, true /* isLink */, pagePath);
+async function emplaceLinks(links, pagePath, resourcePath) {
+    return await emplaceLinksOrMetasImpl(
+        links, true /* isLink */, pagePath, resourcePath);
 }
 
-async function emplaceMetas(metas, pagePath) {
+async function emplaceMetas(metas, pagePath, resourcePath) {
     if (isEmpty(metas))
         metas.push({charset: 'utf-8'});
 
-    return await emplaceLinksOrMetasImpl(metas, false /* isLink */, pagePath);
+    return await emplaceLinksOrMetasImpl(
+        metas, false /* isLink */, pagePath, resourcePath);
 }
 
-async function emplaceLinksOrMetasImpl(linksOrMetas, isLink, pagePath) {
+async function emplaceLinksOrMetasImpl(
+    linksOrMetas, isLink, pagePath, resourcePath) {
     assert(isDefined(pagePath));
 
-    const tag = isLink ? '<link ' : '<meta ';
-    //   const     finalList =
-    //       await overrideSet(isLink ? linkTags : metaTags, linksOrMetas);
+    const tag       = isLink ? '<link ' : '<meta ';
+    const finalList = await overrideSet(
+        isLink ? linkTags : metaTags, linksOrMetas, resourcePath);
     const stringLinksOrMetas =
-        linksOrMetas
+        finalList
             .map(current => {
                 /*
                  * Delete the `original` property so that it won't
@@ -1210,7 +1317,7 @@ async function emplaceLinksOrMetasImpl(linksOrMetas, isLink, pagePath) {
         isLink ? LINK_TAG : META_TAG, pagePath, pagePath, stringLinksOrMetas);
 }
 
-async function overrideSet(standard, given) {
+async function overrideSet(standard, given, resourcePath) {
     logger.info('overrideSet(): given --- ', given, ', standard: ', standard);
     const visibilityMap = new Map();
     const finalSet      = Object.assign([], standard);
@@ -1402,6 +1509,7 @@ async function relinkPages(pages, resourcePath) {
             relativePathImpl(pageFullPath, routerFullPath);
 
         const importDecl = strJoin(
+            `import { useNavigate } from "react-router-dom";`,
             `import { navigateTo } from "${navigatorRelativePath}";`,
             `import Router from "${routerRelativePath}";`,
             `import Loader from "${loaderRelativePath}";`,
@@ -1931,9 +2039,13 @@ function filterAssetsByRelativity(providedAssets, assetDetail) {
 }
 
 function numberOfComponents(filepath) {
+    let match;
+    if (isWindowsOS() && (match = filepath.match(/^[A-Z]:/))) {
+        filepath = filepath.slice(match[0].length);
+    }
     return path.normalize(filepath)
         .split(path.sep)
-        .filter(p => isNotEmpty(p))
+        .filter(p => isNotEmpty(p) && p !== '.')
         .length;
 }
 
@@ -3015,6 +3127,7 @@ export function exports() {
             readFile,
             getRootDirectory,
             unzipProject,
+            extensionsOf,
             unGzipProject,
             checkIfActuallyRoot,
             findIndexFile,
