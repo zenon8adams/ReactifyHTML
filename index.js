@@ -38,6 +38,7 @@ const converterConfig = {
     usePathRelativeIndex: true,
     archive: true,
     entryPoint: 'index.html',
+    subdirectory: '.',
     weakReplacement: false,
     useAsciiDisplay: false
 };
@@ -78,6 +79,12 @@ program
     .addOption(new Option('-a, --archive <boolean>', 'compress output project')
                    .default(converterConfig.archive)
                    .argParser(parseBoolean))
+    .addOption(new Option(
+                   '-sd, --subdirectory <string>',
+                   strJoin(
+                       'select a directory to retrieve the',
+                       'entry point from in a compressed archive', '\n'))
+                   .default(converterConfig.subdirectory))
     .option(
         '-e, --entry-point <string>', 'set entry point to start processing',
         'index.html')
