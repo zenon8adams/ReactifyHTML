@@ -388,7 +388,8 @@ export async function generateAllPages(config) {
         await removeTemplates(processingParams);
 
     } catch (err) {
-        console.error('Unable to generate project:', initialPath);
+        console.error(
+            'Unable to generate project:', converterConfig.initialPath);
         logger.error(err);
         await cleanOldFiles();
         await cleanTemporaryFiles();
@@ -1446,9 +1447,9 @@ async function relinkPages(pages, resourcePath) {
     // route.
     const routeMap = new Map();
     pages.forEach(
-        page => routeMap.set(
+        page => {routeMap.set(
             page.isLanding ? page.href : path.join(page.rela, page.href),
-            page.route));
+            [page.route, page])});
 
     /*\
      * Match all href content of all anchor tags.
@@ -1509,12 +1510,11 @@ async function relinkPages(pages, resourcePath) {
             relativePathImpl(pageFullPath, routerFullPath);
 
         const importDecl = strJoin(
-            `import { useNavigate } from "react-router-dom";`,
-            `import { navigateTo } from "${navigatorRelativePath}";`,
+            `import { useNavigator } from "${navigatorRelativePath}";`,
             `import Router from "${routerRelativePath}";`,
             `import Loader from "${loaderRelativePath}";`,
             `@{${REACT_IMPORT_TAG}}`, '\n');
-        const navDecl       = `\nconst navigate = useNavigate();`;
+        const navDecl       = `\nconst navigateTo = useNavigator();`;
         const useImportDecl = strJoin(navDecl, `@{${USE_IMPORT_TAG}}`, '\n');
 
         const [pageUrl, realname] = getPageRoute(page);
@@ -1553,14 +1553,17 @@ function fixAnchorRoutes(html, page, matches, routeMap) {
 
     const hKey = 'href=';
     for (const match of matches) {
-        const ihref         = html.slice(match.index).indexOf(hKey);
-        const start         = match.index + ihref + hKey.length;
-        const end           = match.index + match[0].length;
-        const route         = getMatchingRoute(page, match[1], routeMap);
-        const routeConstant = `Router.${page.info.name}`;
-        const link          = isWeakPolicy ? match[1] : 'javascript:void(0);';
-        const repl =
-            `"${link}" onClick={(e) => navigateTo(e, ${routeConstant})}`;
+        const ihref               = html.slice(match.index).indexOf(hKey);
+        const start               = match.index + ihref + hKey.length;
+        const end                 = match.index + match[0].length;
+        const [route, p]          = getMatchingRoute(page, match[1], routeMap);
+        const [pageUrl, realname] = getPageRoute(p);
+        const declName            = deriveNameFrom(realname, {suffix: 'Page'});
+        const routeConstant       = `Router.${declName}`;
+        const link = isWeakPolicy ? match[1] : 'javascript:void(0);';
+        const repl = strJoin(
+            `"${link}" `, `onClick={(e) => `,
+            `navigateTo(e, ${routeConstant})}`, '');
 
         html = html.substring(0, start) + repl + html.substring(end);
     }
