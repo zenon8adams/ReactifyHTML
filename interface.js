@@ -66,8 +66,8 @@ import {
 
 
 const __dirname    = dirname(fileURLToPath(import.meta.url));
-const sessionID    = randomCounter(8);
-const temporaryDir = path.join(os.tmpdir(), PROJECT_NAME, sessionID);
+const SESSION_ID   = randomCounter(8);
+const temporaryDir = path.join(os.tmpdir(), PROJECT_NAME, SESSION_ID);
 
 // Logger dependencies
 import winston from 'winston';
@@ -387,6 +387,15 @@ export async function generateAllPages(config) {
         await finalizeWriter(allPages, processingParams);
         await removeTemplates(processingParams);
 
+        if (converterConfig.archive) {
+            const {buildB} = processingParams;
+            assert(isDefined(buildB));
+
+            const projectName =
+                deriveProjectNameFrom(mainSourceDir, SESSION_ID);
+            await bundleProject(buildB, projectName);
+        }
+
     } catch (err) {
         console.error(
             'Unable to generate project:', converterConfig.initialPath);
@@ -403,7 +412,7 @@ export async function generateAllPages(config) {
     await cleanTemporaryFiles();
 
     process.stdout.write(
-        'Success! Generated projects has been written to `' + BUILD_DIR +
+        '\x1B[2KSuccess! Generated projects has been written to `' + BUILD_DIR +
         '` directory\n');
 
     process.exit(0);
@@ -539,9 +548,27 @@ function getRootDirectory(file, startingPath) {
     return dir;
 }
 
+async function gzipProject(providedPath, outputName) {
+    return await compressGZipImpl(providedPath, outputName);
+}
+
+async function compressGZipImpl(providedPath, finalName) {
+    assert(fs.existsSync(providedPath));
+    assert(fs.statSync(providedPath).isDirectory());
+
+    const outputFullPath =
+        path.join(temporaryDir, BUILD_DIR, finalName + '.tar.gz');
+    await fsp.mkdir(path.dirname(outputFullPath), {recursive: true});
+    await tar.create(
+        {gzip: true, file: outputFullPath, cwd: providedPath}, ['']);
+
+    return outputFullPath;
+}
+
 async function unzipProject(providedPath) {
     return await decompressZipOrGzipImpl(providedPath, Decompressor.Zip);
 }
+
 
 async function unGzipProject(providedPath) {
     return await decompressZipOrGzipImpl(providedPath, Decompressor.Gzip);
@@ -939,6 +966,14 @@ function humanReadableFormOf(bytes) {
     return `${bytes.toFixed(2)}${units[i]}`;
 }
 
+async function bundleProject(projectPath, projectName) {
+    const zipFilePath    = await gzipProject(projectPath, projectName);
+    const zipFileNewPath = path.join(projectPath, path.basename(zipFilePath));
+    await deleteDirectory(projectPath);
+    await fsp.mkdir(path.dirname(zipFileNewPath), {recursive: true});
+    await fsp.rename(zipFilePath, zipFileNewPath);
+}
+
 async function removeTemplates(resourcePath) {
     const {pageB} = resourcePath;
     assert(isString(pageB));
@@ -1070,6 +1105,15 @@ async function emplaceInPage(scripts, pagePath) {
     }
 
     await emplaceImpl(PAGE_SCRIPT_TAG, pagePath, pagePath, scriptsList);
+}
+
+function deriveProjectNameFrom(sourceDir, sessionID) {
+    const sourceDirName = path.basename(sourceDir);
+    if (sourceDirName === sessionID) {
+        return `package-${sessionID}-build`;
+    }
+
+    return sourceDirName;
 }
 
 function deriveNameFrom(filePath, opts) {
@@ -2334,7 +2378,8 @@ async function initializeProjectStructure() {
         styleB: indexCssBuildFullPath,
         rootB: rootHTMLBuildFullPath,
         scriptB: indexJsBuildFullPath,
-        appB: appBuildFullPath
+        appB: appBuildFullPath,
+        buildB: buildDirFullPath
     };
 }
 
@@ -2427,11 +2472,11 @@ function extractTitle(doc, node) {
 
 function extractLinks(doc, referencePath) {
     return extractPropsImpl(doc, referencePath, 'head link')
-        /*
+        /*\
          * Add the original path where the link is found
          * as we might have to access the resource to
          * fix missing links in it.
-         */
+        \*/
         .map(
             link => ({
                 ...link,
@@ -2762,10 +2807,10 @@ function isAlreadyWrappedWithAnnon(content) {
     return prefix == startPiece;
 }
 
-/*
+/*\
  * For template html in scripts, convert them to `object` element.
  * And embed them into the page.
- */
+\*/
 async function adaptToHTML(doc, element) {
     const externalResolver = doc.createElement('object');
     modifyAttributes(externalResolver, await getAttributes(element));
@@ -3135,11 +3180,13 @@ export function exports() {
             checkIfActuallyRoot,
             findIndexFile,
             downloadProject,
+            bundleProject,
             removeTemplates,
             finalizeWriter,
             buildPathTemplateFrom,
             emplaceScripts,
             emplaceInPage,
+            deriveProjectNameFrom,
             deriveNameFrom,
             capitalize,
             strJoin,
