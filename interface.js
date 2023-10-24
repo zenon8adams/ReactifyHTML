@@ -66,8 +66,8 @@ import {
 
 
 const __dirname    = dirname(fileURLToPath(import.meta.url));
-const sessionID    = randomCounter(8);
-const temporaryDir = path.join(os.tmpdir(), PROJECT_NAME, sessionID);
+const SESSION_ID   = randomCounter(8);
+const temporaryDir = path.join(os.tmpdir(), PROJECT_NAME, SESSION_ID);
 
 // Logger dependencies
 import winston from 'winston';
@@ -119,11 +119,10 @@ modifyLock(
     FAVICON_DIR_TAG);
 
 // Inject the meta description and title into App.jsx
-const PAGE_INFO_TAG = 'CASE_PAGE_INFO';
+const PAGE_ROUTE_TAG = 'PAGE_ROUTE';
+const PAGE_NAME_TAG  = 'PAGE_NAME';
 
-const PAGE_NAME_TAG = 'PAGE_NAME';
-
-modifyLock(PAGE_INFO_TAG, PAGE_NAME_TAG);
+modifyLock(PAGE_ROUTE_TAG, PAGE_NAME_TAG);
 
 // --- Replacement Tags --- //
 
@@ -181,8 +180,23 @@ function logWrapper() {
 // --- Logger --- //
 
 // This is the projects root directory
-let   mainSourceDir;
-const converterConfig = {};
+let mainSourceDir;
+/*\
+ * The converterConfig was moved
+ * here so as not to make the assertions
+ * in the functions trigger during testing
+ * phase.
+\*/
+const converterConfig = {
+    searchDepth: -1,
+    deduceAssetsFromBasePath: true,
+    usePathRelativeIndex: true,
+    archive: true,
+    entryPoint: 'index.html',
+    subdirectory: '.',
+    weakReplacement: false,
+    useAsciiDisplay: false
+};
 
 export async function generateAllPages(config) {
     let allPageMetas = [], allStyles = '', allLinks = [], allScripts = [],
@@ -335,8 +349,8 @@ export async function generateAllPages(config) {
                 \*/
 
                 await emplaceTitle(pageTitle, pagePath);
-                await emplaceMetas(pageMetas, pagePath);
-                await emplaceLinks(pageLinks, pagePath);
+                await emplaceMetas(pageMetas, pagePath, resourcePath);
+                await emplaceLinks(pageLinks, pagePath, resourcePath);
                 await emplaceScripts(scripts, pagePath, resourcePath);
 
                 // Queue newly fetched pages to the stream.
@@ -373,8 +387,18 @@ export async function generateAllPages(config) {
         await finalizeWriter(allPages, processingParams);
         await removeTemplates(processingParams);
 
+        if (converterConfig.archive) {
+            const {buildB} = processingParams;
+            assert(isDefined(buildB));
+
+            const projectName =
+                deriveProjectNameFrom(mainSourceDir, SESSION_ID);
+            await bundleProject(buildB, projectName);
+        }
+
     } catch (err) {
-        console.error('Unable to generate project:', initialPath);
+        console.error(
+            'Unable to generate project:', converterConfig.initialPath);
         logger.error(err);
         await cleanOldFiles();
         await cleanTemporaryFiles();
@@ -386,6 +410,10 @@ export async function generateAllPages(config) {
     // Move cursor to beginning.
     process.stdout.write('\x1B[1B\x1B[2K\x1B[1A\x1B[10000D');
     await cleanTemporaryFiles();
+
+    process.stdout.write(
+        '\x1B[2KSuccess! Generated projects has been written to `' + BUILD_DIR +
+        '` directory\n');
 
     process.exit(0);
 }
@@ -414,7 +442,6 @@ async function resolveLandingPage(providedPath) {
             return await downloadProject(providedPath);
         }
 
-
         const functions = {
             [Decompressor.Zip]: unzipProject,
             [Decompressor.Gzip]: unGzipProject
@@ -429,7 +456,7 @@ async function resolveLandingPage(providedPath) {
                               .split('|')
                               .map(ext => ({[ext]: functions[dc]})))
                 .flat()
-                // Sort the listings by extension length in ascending order
+                // Sort the listings by extension length in decending order
                 // so that longer extension names are matched first.
                 .sort((one, other) => {
                     const oneLen   = Object.keys(one)[0].length;
@@ -445,8 +472,8 @@ async function resolveLandingPage(providedPath) {
 
         // Match the longest extension name that can be derived from the
         // basename
-        const ext =
-            Object.keys(associations).find(ex => base.lastIndexOf(ex) !== -1);
+        const ext = Object.keys(associations)
+                        .find(ex => providedPath.slice(-ex.length) === ex);
         let selector = associations[ext];
 
         if (isNotDefined(selector)) {
@@ -488,19 +515,19 @@ async function tryDecodeFromMagic(providedPath, lookup) {
 
 async function readFile(filepath, maxLength) {
     return new Promise(async (resolve, reject) => {
-        fs.open(filepath, 'r', (o_err, fd) => {
-            if (o_err) {
-                reject(o_err);
+        fs.open(filepath, 'r', (oErr, fd) => {
+            if (oErr) {
+                reject(oErr);
                 return;
             }
 
             const buffer = new Uint8Array(maxLength);
-            fs.read(fd, buffer, 0, maxLength, 0, (r_err, n_read, buffer) => {
-                if (r_err) {
-                    reject(r_err);
+            fs.read(fd, buffer, 0, maxLength, 0, (rErr, read, buffer) => {
+                if (rErr) {
+                    reject(rErr);
                     return;
                 }
-                resolve([n_read, buffer]);
+                resolve([read, buffer]);
             });
         });
     });
@@ -521,9 +548,27 @@ function getRootDirectory(file, startingPath) {
     return dir;
 }
 
+async function gzipProject(providedPath, outputName) {
+    return await compressGZipImpl(providedPath, outputName);
+}
+
+async function compressGZipImpl(providedPath, finalName) {
+    assert(fs.existsSync(providedPath));
+    assert(fs.statSync(providedPath).isDirectory());
+
+    const outputFullPath =
+        path.join(temporaryDir, BUILD_DIR, finalName + '.tar.gz');
+    await fsp.mkdir(path.dirname(outputFullPath), {recursive: true});
+    await tar.create(
+        {gzip: true, file: outputFullPath, cwd: providedPath}, ['']);
+
+    return outputFullPath;
+}
+
 async function unzipProject(providedPath) {
     return await decompressZipOrGzipImpl(providedPath, Decompressor.Zip);
 }
+
 
 async function unGzipProject(providedPath) {
     return await decompressZipOrGzipImpl(providedPath, Decompressor.Gzip);
@@ -534,6 +579,9 @@ async function decompressZipOrGzipImpl(archivePath, decompressor) {
         decompressor === Decompressor.Zip ||
         decompressor === Decompressor.Gzip);
 
+    const {subdirectory} = converterConfig;
+    assert(isDefined(subdirectory) && isString(subdirectory));
+
     const decomps  = Object.values(Decompressor);
     const rootPath = await[decompressZipImpl, decompressGzipImpl].at(
         decomps.indexOf(decompressor))(archivePath);
@@ -543,7 +591,22 @@ async function decompressZipOrGzipImpl(archivePath, decompressor) {
 
     const info = fs.statSync(filePath);
     if (info.isDirectory()) {
-        return findIndexFile(filePath);
+        /*\
+         * If a subdirectory argument is provided,
+         * we have to find the entry point in the
+         * subdirectory provided.
+        \*/
+        const extendedFilePath    = path.join(filePath, subdirectory);
+        const extendedIsDirectory = fs.existsSync(extendedFilePath) &&
+            fs.statSync(extendedFilePath).isDirectory();
+        if (extendedFilePath === filePath || extendedIsDirectory) {
+            return findIndexFile(extendedFilePath);
+        } else {
+            const shortpath = path.relative(temporaryDir, extendedFilePath);
+            throw new Error(strJoin(
+                'Error: provided subdirectory`', shortpath,
+                '` is not a valid directory.', ''));
+        }
     } else {
         // For nested archives such as .tar.gz
         // or previously resolved path cyling
@@ -553,33 +616,77 @@ async function decompressZipOrGzipImpl(archivePath, decompressor) {
 }
 
 async function decompressGzipImpl(archivePath) {
-    let seenRootDir = false;
-    let rootDir     = '';
-    let progress    = 0;
+    let seenRootDir   = false;
+    let rootDir       = '';
+    let progress      = 0;
+    let receivedBytes = 0;
     return new Promise(async (resolve, reject) => {
         const readStream  = fs.createReadStream(archivePath);
         const unzipStream = zlib.createGunzip();
-        unzipStream.pipe(tar.extract({
-            cwd: temporaryDir,
-            onentry: (entry) => {
-                [rootDir, seenRootDir] =
-                    checkIfActuallyRoot(rootDir, entry.path);
-                progress = displayProgress('Extracting', progress, -1);
-            }
-        }));
+        const ext         = extensionsOf(archivePath, 2);
+        /*
+         * `node-tar` cannot handle recursively compressed
+         * archives (e.g .zip.gz). Give `node-tar` only
+         * archives it can process then use the builtin
+         * zlib facility to deflate .gz archive.
+         */
+        if (ext.indexOf('.tar.gz') !== -1 || ext.indexOf('.tgz') !== -1) {
+            unzipStream.pipe(tar.extract({
+                cwd: temporaryDir,
+                onentry: (entry) => {
+                    [rootDir, seenRootDir] =
+                        checkIfActuallyRoot(rootDir, entry.path);
+                }
+            }));
+            unzipStream.on('finish', async () => {
+                resolve(seenRootDir ? rootDir : './');
+            });
+        } else {
+            const ext = path.extname(archivePath);
+            assert(ext === '.gz');
+            const writeFile   = archivePath.slice(0, -ext.length);
+            const writeStream = fs.createWriteStream(writeFile);
+            unzipStream.pipe(writeStream);
+            writeStream.on('error', reject);
+            unzipStream.on('finish', () => {
+                resolve(path.relative(temporaryDir, writeFile));
+            });
+        }
 
         readStream.pipe(unzipStream);
+        readStream.on('data', (received) => {
+            receivedBytes += received.length;
+            progress =
+                displayProgress('Extracting', progress, -1, receivedBytes);
+        });
         readStream.on('error', reject);
         unzipStream.on('error', reject);
-        unzipStream.on('finish', () => resolve(seenRootDir ? rootDir : './'));
     })
 };
 
+function extensionsOf(file, level) {
+    assert(isDefined(file) && isString(file));
+    assert(isNumber(level) && level >= 1);
+
+    let jExt = '';
+    for (let i = 0; i < level; ++i) {
+        const {ext} = path.parse(file);
+        if (isEmpty(ext)) {
+            return jExt;
+        }
+        jExt = ext + jExt;
+        file = file.slice(0, -ext.length);
+    }
+
+    return jExt;
+}
+
 async function decompressZipImpl(archivePath) {
-    let handleCount = 0;
-    let rootDir     = '';
-    let seenRootDir = false;
-    let progress    = 0;
+    let handleCount   = 0;
+    let rootDir       = '';
+    let seenRootDir   = false;
+    let progress      = 0;
+    let receivedBytes = 0;
     return new Promise((resolve, reject) => {
         yauzl.open(archivePath, {lazyEntries: true}, async (err, zipfile) => {
             if (err) {
@@ -608,7 +715,6 @@ async function decompressZipImpl(archivePath) {
                 [rootDir, seenRootDir] =
                     checkIfActuallyRoot(rootDir, entry.fileName);
 
-                progress = displayProgress('Extracting', progress, -1);
                 logger.info('Processing:', destPath);
                 if (/\/$/.test(entry.fileName)) {
                     // directory file names end with '/'
@@ -639,6 +745,11 @@ async function decompressZipImpl(archivePath) {
                         incrementHandleCount();
                         writeStream.on('close', decrementHandleCount);
                         readStream.pipe(filter).pipe(writeStream);
+                        readStream.on('data', (received) => {
+                            receivedBytes += received.length;
+                            progress = displayProgress(
+                                'Extracting', progress, -1, receivedBytes);
+                        });
                     });
                 }
             });
@@ -661,7 +772,12 @@ async function decompressZipImpl(archivePath) {
 \*/
 function checkIfActuallyRoot(maybeRootDir, readPath) {
     if (isEmpty(maybeRootDir)) {
-        maybeRootDir = readPath;
+        if (numberOfComponents(readPath) > 1) {
+            const root   = readPath.slice(0, nextOf(0, readPath, path.sep));
+            maybeRootDir = root;
+        } else {
+            maybeRootDir = readPath;
+        }
     }
 
     if (path.relative(maybeRootDir, readPath).startsWith('..')) {
@@ -672,7 +788,17 @@ function checkIfActuallyRoot(maybeRootDir, readPath) {
 }
 
 async function findIndexFile(providedPath) {
-    async function findIndexFileImpl(initialPath) {
+    const {entryPoint} = converterConfig;
+    assert(isDefined(entryPoint) && isString(entryPoint));
+
+    return await findFile(entryPoint, providedPath);
+}
+
+async function findFile(filename, providedPath) {
+    assert(isDefined(filename));
+    assert(filename === '*' || isString(filename));
+
+    async function findFileImpl(initialPath) {
         const directoryQueue    = [];
         const directoryIterator = await fsp.readdir(initialPath);
         for (const file of directoryIterator) {
@@ -680,7 +806,10 @@ async function findIndexFile(providedPath) {
             const stat        = fs.statSync(filePath);
             const isDirectory = stat.isDirectory(filePath);
 
-            if (file === converterConfig.entryPoint) {
+            // If we found the file or user
+            // didn't specify any particular file,
+            // return the first file found.
+            if (filename === '*' || file === filename) {
                 return filePath;
             } else if (isDirectory) {
                 directoryQueue.push(filePath);
@@ -692,14 +821,14 @@ async function findIndexFile(providedPath) {
          * next nodes to explore in a queue.
         \*/
         for (const directory of directoryQueue) {
-            const file = await findIndexFileImpl(directory);
+            const file = await findFileImpl(directory);
             if (isDefined(file)) {
                 return file;
             }
         }
     }
 
-    const file = await findIndexFileImpl(providedPath);
+    const file = await findFileImpl(providedPath);
 
     return file;
 }
@@ -757,6 +886,11 @@ async function downloadProject(url, original, redirectDepth) {
                        if (err.code === 'ETIMEDOUT') {
                            reject(new Error('Error: Connection timed out'));
                            return;
+                       } else if (err.code === 'EAI_AGAIN') {
+                           reject(new Error(strJoin(
+                               'Error: Unable to connect to host.',
+                               'Check your internet conectivity and try again.',
+                               '\n')));
                        }
                        reject(err);
                    });
@@ -768,7 +902,7 @@ async function downloadProject(url, original, redirectDepth) {
                           next.redirectUrl, url, next.depth + 1);
                   } else if (next.depth > MAX_REDIRECT) {
                       return Promise.reject(
-                          new Error('Maxium redirect reached'));
+                          new Error('Maximum redirection reached'));
                   } else {
                       return resolveLandingPage(next.path);
                   }
@@ -776,18 +910,30 @@ async function downloadProject(url, original, redirectDepth) {
 }
 
 function displayProgress(prefix, progress, total, received) {
+    const {useAsciiDisplay} = converterConfig;
+    assert(isDefined(useAsciiDisplay) && isBoolean(useAsciiDisplay));
+
     const LOADING_INDICATORS = 25;
-    const WAITING_INDICATORS = 3;
+    const MOTION_INTERVAL    = 70;
     const SPACING            = 4;
+
     if (total == -1) {
-        const value  = (progress + 1) % WAITING_INDICATORS + 1;
+        if (progress > 1 && progress % MOTION_INTERVAL !== 0) {
+            return ++progress;
+        }
+        const value   = (progress / MOTION_INTERVAL + 1) % LOADING_INDICATORS;
+        const pointer = useAsciiDisplay ? '*-*-*' : '◉·●·◉';
+        let   indicators =
+            pointer + '-'.repeat(LOADING_INDICATORS - pointer.length);
+        indicators =
+            indicators.slice(-1 * value) + indicators.slice(0, -1 * value);
+        indicators   = '[' + indicators + ']';
         const suffix = isDefined(received) ?
-            ' '.repeat(WAITING_INDICATORS + SPACING - value + 1) +
-                humanReadableFormOf(received) :
+            ' '.repeat(SPACING) + humanReadableFormOf(received) :
             '';
         process.stdout.write(
-            `\x1B[2K${prefix}` +
-            '.'.repeat(value) + suffix + '\x1B[10000D');
+            `\x1B[2K${prefix}... ` + indicators + suffix + '\x1B[10000D');
+
         return ++progress;
     } else {
         const suffix =
@@ -809,13 +955,23 @@ function displayProgress(prefix, progress, total, received) {
     }
 }
 
+
 function humanReadableFormOf(bytes) {
-    const units = ['B', 'KB', 'MB', 'GB', 'TB'];
+    const BYTE_SCALING = 1024;
+    const units        = ['B', 'KB', 'MB', 'GB', 'TB'];
     let   i;
-    for (i = 0; bytes >= 1024 && i < units.length - 1; i++) {
-        bytes /= 1024;
+    for (i = 0; bytes >= BYTE_SCALING && i < units.length - 1; i++) {
+        bytes /= BYTE_SCALING;
     }
     return `${bytes.toFixed(2)}${units[i]}`;
+}
+
+async function bundleProject(projectPath, projectName) {
+    const zipFilePath    = await gzipProject(projectPath, projectName);
+    const zipFileNewPath = path.join(projectPath, path.basename(zipFilePath));
+    await deleteDirectory(projectPath);
+    await fsp.mkdir(path.dirname(zipFileNewPath), {recursive: true});
+    await fsp.rename(zipFilePath, zipFileNewPath);
 }
 
 async function removeTemplates(resourcePath) {
@@ -880,7 +1036,6 @@ async function finalizeWriter(pages, resourcePath) {
         ASSETS_PRESENT_TAG, webpackB, webpackB,
         assetIsPresent ? 'true' : 'false');
 
-    await emplaceImpl(PAGE_INFO_TAG, appB, appB, '');
     await emplaceImpl(ROUTES_TAG, appB, appB, '');
 }
 
@@ -950,6 +1105,15 @@ async function emplaceInPage(scripts, pagePath) {
     }
 
     await emplaceImpl(PAGE_SCRIPT_TAG, pagePath, pagePath, scriptsList);
+}
+
+function deriveProjectNameFrom(sourceDir, sessionID) {
+    const sourceDirName = path.basename(sourceDir);
+    if (sourceDirName === sessionID) {
+        return `package-${sessionID}-build`;
+    }
+
+    return sourceDirName;
 }
 
 function deriveNameFrom(filePath, opts) {
@@ -1161,28 +1325,31 @@ async function emplaceRootAttrs(node, resourcePath) {
     }
 }
 
-async function emplaceLinks(links, pagePath) {
-    return await emplaceLinksOrMetasImpl(links, true /* isLink */, pagePath);
+async function emplaceLinks(links, pagePath, resourcePath) {
+    return await emplaceLinksOrMetasImpl(
+        links, true /* isLink */, pagePath, resourcePath);
 }
 
-async function emplaceMetas(metas, pagePath) {
+async function emplaceMetas(metas, pagePath, resourcePath) {
     if (isEmpty(metas))
         metas.push({charset: 'utf-8'});
 
-    return await emplaceLinksOrMetasImpl(metas, false /* isLink */, pagePath);
+    return await emplaceLinksOrMetasImpl(
+        metas, false /* isLink */, pagePath, resourcePath);
 }
 
-async function emplaceLinksOrMetasImpl(linksOrMetas, isLink, pagePath) {
+async function emplaceLinksOrMetasImpl(
+    linksOrMetas, isLink, pagePath, resourcePath) {
     assert(isDefined(pagePath));
 
-    const tag = isLink ? '<link ' : '<meta ';
-    //   const     finalList =
-    //       await overrideSet(isLink ? linkTags : metaTags, linksOrMetas);
+    const tag       = isLink ? '<link ' : '<meta ';
+    const finalList = await overrideSet(
+        isLink ? linkTags : metaTags, linksOrMetas, resourcePath);
     const stringLinksOrMetas =
-        linksOrMetas
+        finalList
             .map(current => {
                 /*
-                 * Delete the `original` tag so that it won't
+                 * Delete the `original` property so that it won't
                  * reflect as an attribute.
                  */
                 delete current.original;
@@ -1195,7 +1362,7 @@ async function emplaceLinksOrMetasImpl(linksOrMetas, isLink, pagePath) {
         isLink ? LINK_TAG : META_TAG, pagePath, pagePath, stringLinksOrMetas);
 }
 
-async function overrideSet(standard, given) {
+async function overrideSet(standard, given, resourcePath) {
     logger.info('overrideSet(): given --- ', given, ', standard: ', standard);
     const visibilityMap = new Map();
     const finalSet      = Object.assign([], standard);
@@ -1324,10 +1491,16 @@ async function relinkPages(pages, resourcePath) {
     // route.
     const routeMap = new Map();
     pages.forEach(
-        page => routeMap.set(
+        page => {routeMap.set(
             page.isLanding ? page.href : path.join(page.rela, page.href),
-            page.route));
+            [page.route, page])});
 
+    /*\
+     * Match all href content of all anchor tags.
+     * Example:
+     * <a href="https://www.google.com"></a>
+     * The matched text will be `https://www.google.com`.
+    \*/
     const re = new RegExp(
         '<a[^]+?href[^=]*=[^`\'"]*((?:"[^"\\\\]*' +
             '(?:\\\\.[^"\\\\]*)*"|\'[^\'\\\\]*(?:\\\\.' +
@@ -1335,6 +1508,12 @@ async function relinkPages(pages, resourcePath) {
         'gm');
 
     const empty_re = new RegExp('<a[^]+?href[^=]*=(""|\'\'|``)', 'gm');
+
+    const loaderFullPath = path.join(pageB, '..', 'loader', 'component-loader');
+    const navigatorFullPath = path.join(pageB, '..', 'navigator', 'navigate');
+    const routerFullPath    = path.join(pageB, '..', 'navigator', 'routes');
+    const routerFile        = routerFullPath + '.js';
+
     for (const page of pages) {
         const {html} = page;
         assert(html);
@@ -1366,26 +1545,38 @@ async function relinkPages(pages, resourcePath) {
             html: fixAnchorRoutes(page.html, page, allLinks, routeMap)
         });
 
-        const loaderFullPath =
-            path.join(pageB, '..', 'loader', 'component-loader');
-        const pageFullPath       = path.join(pageB, page.info.path);
-        const loaderRelativePath = useOSIndependentPath(
-            './' + path.relative(path.dirname(pageFullPath), loaderFullPath));
+        const pageFullPath = path.join(pageB, page.info.path);
+        const loaderRelativePath =
+            relativePathImpl(pageFullPath, loaderFullPath);
+        const navigatorRelativePath =
+            relativePathImpl(pageFullPath, navigatorFullPath);
+        const routerRelativePath =
+            relativePathImpl(pageFullPath, routerFullPath);
+
         const importDecl = strJoin(
-            `import { useNavigate } from "react-router-dom";`,
+            `import { useNavigator } from "${navigatorRelativePath}";`,
+            `import Router from "${routerRelativePath}";`,
             `import Loader from "${loaderRelativePath}";`,
             `@{${REACT_IMPORT_TAG}}`, '\n');
-        const navDecl = `\nconst navigate = useNavigate();`;
-        const navFun  = strJoin(
-             `const navigateTo = (event, page) => {`, `event.preventDefault();`,
-             `navigate(page);`, `}`, '\t\n');
-        const useImportDecl =
-            strJoin(navDecl, navFun, `@{${USE_IMPORT_TAG}}`, '\n');
+        const navDecl       = `\nconst navigateTo = useNavigator();`;
+        const useImportDecl = strJoin(navDecl, `@{${USE_IMPORT_TAG}}`, '\n');
+
+        const [pageUrl, realname] = getPageRoute(page);
+        const declName            = deriveNameFrom(realname, {suffix: 'Page'});
+        const routeDecl =
+            strJoin(`${declName}: "${pageUrl}",`, `@{${PAGE_ROUTE_TAG}}`, '\n');
 
         await emplaceImpl(
             REACT_IMPORT_TAG, pageFullPath, pageFullPath, importDecl);
         await emplaceImpl(
             USE_IMPORT_TAG, pageFullPath, pageFullPath, useImportDecl);
+        await emplaceImpl(PAGE_ROUTE_TAG, routerFile, routerFile, routeDecl);
+    }
+    await emplaceImpl(PAGE_ROUTE_TAG, routerFile, routerFile, '');
+
+    function relativePathImpl(onePath, otherPath) {
+        return useOSIndependentPath(
+            './' + path.relative(path.dirname(onePath), otherPath));
     }
 }
 
@@ -1400,15 +1591,23 @@ function getMatchingRoute(page, match, routeMap) {
 }
 
 function fixAnchorRoutes(html, page, matches, routeMap) {
-    const isWeakPolicy = converterConfig.weakReplacement;
-    const hKey         = 'href=';
+    const {weakReplacement} = converterConfig;
+    assert(isDefined(weakReplacement) && isBoolean(weakReplacement));
+    const isWeakPolicy = weakReplacement;
+
+    const hKey = 'href=';
     for (const match of matches) {
-        const ihref = html.slice(match.index).indexOf(hKey);
-        const start = match.index + ihref + hKey.length;
-        const end   = match.index + match[0].length;
-        const route = getMatchingRoute(page, match[1], routeMap);
-        const link  = isWeakPolicy ? match[1] : 'javascript:void(0);';
-        const repl  = `"${link}" onClick={(e) => navigateTo(e, '${route}')}`;
+        const ihref               = html.slice(match.index).indexOf(hKey);
+        const start               = match.index + ihref + hKey.length;
+        const end                 = match.index + match[0].length;
+        const [route, p]          = getMatchingRoute(page, match[1], routeMap);
+        const [pageUrl, realname] = getPageRoute(p);
+        const declName            = deriveNameFrom(realname, {suffix: 'Page'});
+        const routeConstant       = `Router.${declName}`;
+        const link = isWeakPolicy ? match[1] : 'javascript:void(0);';
+        const repl = strJoin(
+            `"${link}" `, `onClick={(e) => `,
+            `navigateTo(e, ${routeConstant})}`, '');
 
         html = html.substring(0, start) + repl + html.substring(end);
     }
@@ -1417,12 +1616,16 @@ function fixAnchorRoutes(html, page, matches, routeMap) {
 }
 
 function fixEmptyLinks(html, page, matches) {
+    const {weakReplacement} = converterConfig;
+    assert(isDefined(weakReplacement) && isBoolean(weakReplacement));
+    const isWeakPolicy = weakReplacement;
+
     for (const match of matches) {
         const start =
             match.index + match[0].length - 2 /* Subtract the empty quote */;
-        const end = match.index + match[0].length;
-        const repl =
-            '"javascript:void(0);" onClick={(e) => e.preventDefault()}';
+        const end  = match.index + match[0].length;
+        const link = isWeakPolicy ? '' : 'javascript:void(0);';
+        const repl = `"${link}" onClick={(e) => e.preventDefault()}`;
 
         html = html.substring(0, start) + repl + html.substring(end);
     }
@@ -1438,9 +1641,8 @@ async function emplaceApp(pages, resourcePath) {
     assert(isArray(pages));
     assert(isString(appB));
 
-    let allPageCases = '';
-    let allRoutes    = '';
-    let routesIncl   = '';
+    let allRoutes  = '';
+    let routesIncl = '';
     for (const page of pages) {
         const {name, title, description} = page.info;
         const [pageUrl, realname]        = getPageRoute(page);
@@ -1448,21 +1650,14 @@ async function emplaceApp(pages, resourcePath) {
         const pageIncl = useOSIndependentPath('./pages/' + realname);
         const declName = deriveNameFrom(realname, {suffix: 'Page'});
 
-        allPageCases = strJoin(
-            allPageCases, `case '${pageUrl}':\n`, `\ttitle = '${title}';\n`,
-            `\tmetaDescription = '${description}';\n`, `\tbreak;\n`, '\t');
-
         allRoutes = strJoin(
-            allRoutes, `<Route`, `path="${pageUrl}"`,
+            allRoutes, `<Route`, `path={Router.${declName}}`,
             `element={<${declName} />} />\n\t\t`, ' ');
 
-
         routesIncl = routesIncl + `\nimport ${declName} from '${pageIncl}';`;
-
         Object.assign(page, {...page, route: pageUrl});
     }
 
-    await emplaceImpl(PAGE_INFO_TAG, appB, appB, allPageCases.trimRight());
     await emplaceImpl(ROUTES_TAG, appB, appB, allRoutes.trimRight());
     await emplaceImpl(ROUTES_INC_TAG, appB, appB, routesIncl.trimRight());
 }
@@ -1806,7 +2001,6 @@ async function retrieveAssetsFromGlobalDirectory(pageSourceFile, assetsList) {
         return requestedAssetsResolvedPath;
     }
 
-
     for (const assetBundle of assetsList) {
         const asset                                      = assetBundle.value;
         const assetInfo                                  = parseFile(asset);
@@ -1892,9 +2086,13 @@ function filterAssetsByRelativity(providedAssets, assetDetail) {
 }
 
 function numberOfComponents(filepath) {
+    let match;
+    if (isWindowsOS() && (match = filepath.match(/^[A-Z]:/))) {
+        filepath = filepath.slice(match[0].length);
+    }
     return path.normalize(filepath)
         .split(path.sep)
-        .filter(p => isNotEmpty(p))
+        .filter(p => isNotEmpty(p) && p !== '.')
         .length;
 }
 
@@ -1935,7 +2133,8 @@ async function resolveGlobalAssetsPath(pageSourceFile, excludePattern) {
                 }
                 return [
                     providedPath,
-                    await indexDirectory(providedPath, indexer.re, {}, 0)
+                    await indexDirectory(
+                        providedPath, indexer.re, converterConfig.searchDepth)
                 ];
             } else {
                 throw new Error('Error: Invalid path provided');
@@ -1949,12 +2148,16 @@ async function resolveGlobalAssetsPath(pageSourceFile, excludePattern) {
         const providedPath = mainSourceDir;
         return [
             providedPath,
-            await indexDirectory(providedPath, excludePattern, {}, 0)
+            await indexDirectory(
+                providedPath, excludePattern, converterConfig.searchDepth)
         ];
     }
 }
 
 async function indexDirectory(globalAssetsPath, excludePattern, maxDepth) {
+    assert(isDefined(maxDepth) && isNumber(maxDepth));
+    maxDepth = maxDepth == -1 ? Infinity : maxDepth;
+
     const originalPath = globalAssetsPath;
     if (indexDirectory[globalAssetsPath]) {
         return indexDirectory[globalAssetsPath];
@@ -2175,7 +2378,8 @@ async function initializeProjectStructure() {
         styleB: indexCssBuildFullPath,
         rootB: rootHTMLBuildFullPath,
         scriptB: indexJsBuildFullPath,
-        appB: appBuildFullPath
+        appB: appBuildFullPath,
+        buildB: buildDirFullPath
     };
 }
 
@@ -2268,11 +2472,11 @@ function extractTitle(doc, node) {
 
 function extractLinks(doc, referencePath) {
     return extractPropsImpl(doc, referencePath, 'head link')
-        /*
+        /*\
          * Add the original path where the link is found
          * as we might have to access the resource to
          * fix missing links in it.
-         */
+        \*/
         .map(
             link => ({
                 ...link,
@@ -2603,10 +2807,10 @@ function isAlreadyWrappedWithAnnon(content) {
     return prefix == startPiece;
 }
 
-/*
+/*\
  * For template html in scripts, convert them to `object` element.
  * And embed them into the page.
- */
+\*/
 async function adaptToHTML(doc, element) {
     const externalResolver = doc.createElement('object');
     modifyAttributes(externalResolver, await getAttributes(element));
@@ -2971,15 +3175,18 @@ export function exports() {
             readFile,
             getRootDirectory,
             unzipProject,
+            extensionsOf,
             unGzipProject,
             checkIfActuallyRoot,
             findIndexFile,
             downloadProject,
+            bundleProject,
             removeTemplates,
             finalizeWriter,
             buildPathTemplateFrom,
             emplaceScripts,
             emplaceInPage,
+            deriveProjectNameFrom,
             deriveNameFrom,
             capitalize,
             strJoin,

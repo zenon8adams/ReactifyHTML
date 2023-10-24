@@ -41,7 +41,7 @@ jobs:
         run: pnpm test
       
       - name: Generate template (Index)
-        run: node index.js examples/
+        run: node index.js --archive false examples/
 
       - name: Echo Logs (Index)
         if: always()
@@ -62,7 +62,7 @@ jobs:
         run: pnpm run build
 
       - name: Generate archive template (Local archive)
-        run: node index.js examples/index.zip
+        run: node index.js --archive false examples/index.zip
 
       - name: Echo Logs (Local archive)
         if: always()
@@ -83,7 +83,7 @@ jobs:
         run: pnpm run build
 
       - name: Generate template (Online archive)
-        run: node index.js https://github.com/technext/novena/releases/download/v.01/novena.zip
+        run: node index.js --archive false https://github.com/technext/novena/releases/download/v.01/novena.zip
       
       - name: Echo Logs (Online archive)
         if: always()

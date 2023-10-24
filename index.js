@@ -32,14 +32,7 @@ import {
 } from './project-info.js';
 // --- Command Line --- //
 
-const converterConfig = {
-    searchDepth: -1,
-    deduceAssetsFromBasePath: true,
-    usePathRelativeIndex: true,
-    archive: true,
-    entryPoint: 'index.html',
-    weakReplacement: false
-};
+const converterConfig = {};
 
 function parseBoolean(str) {
     return str === 'true' || +str > 0;
@@ -53,25 +46,36 @@ program
     .addOption(new Option(
                    '-s, --search-depth <number>',
                    strJoin('set search depth when indexing assets', '\n'))
-                   .default(-1, 'infinite(-1)')
+                   .default(converterConfig.searchDepth, 'infinite(-1)')
                    .argParser(parseInt))
     .addOption(new Option(
                    '-d, --deduce-assets-from-base-path <boolean>',
                    strJoin(
                        'the entry point should be deduced',
                        'from the base directory given', '\n'))
-                   .default(true)
+                   .default(converterConfig.deduceAssetsFromBasePath)
                    .argParser(parseBoolean))
     .addOption(new Option(
                    '-u, --use-path-relative-index <boolean>',
                    strJoin(
                        'assets should retain their structure',
                        'during asset resolution', '\n'))
-                   .default(true)
+                   .default(converterConfig.usePathRelativeIndex)
                    .argParser(parseBoolean))
+    .addOption(
+        new Option(
+            '-i, --use-ascii-display <boolean>', 'Display only ascii loaders')
+            .default(converterConfig.useAsciiDisplay)
+            .argParser(parseBoolean))
     .addOption(new Option('-a, --archive <boolean>', 'compress output project')
-                   .default(true)
+                   .default(converterConfig.archive)
                    .argParser(parseBoolean))
+    .addOption(new Option(
+                   '-sd, --subdirectory <string>',
+                   strJoin(
+                       'select a directory to retrieve the',
+                       'entry point from in a compressed archive', '\n'))
+                   .default(converterConfig.subdirectory))
     .option(
         '-e, --entry-point <string>', 'set entry point to start processing',
         'index.html')
@@ -81,7 +85,7 @@ program
                        'determines if the href attribute of anchor',
                        'tags can be safely replaced with',
                        '`javascript:void(0);', '\n'))
-                   .default(false)
+                   .default(converterConfig.weakReplacement)
                    .argParser(parseBoolean))
     .arguments('<path|archive|url>')
     .action(
