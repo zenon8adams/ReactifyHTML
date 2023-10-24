@@ -5,7 +5,7 @@ import {rimraf} from 'rimraf';
 import {cv, expect, path, PROJECT_NAME} from './test_setup.js';
 
 const sessionID    = '0x01729012';
-const temporaryDir = path.join(os.tmpdir(), 'ReactifyHTML', sessionID);
+const temporaryDir = path.join(os.tmpdir(), PROJECT_NAME, sessionID);
 before(async () => {
     await fs.mkdir(temporaryDir, {recursive: true});
 });

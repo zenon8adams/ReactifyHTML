@@ -19,3 +19,18 @@ describe(`${PROJECT_NAME}::naming`, () => {
         expect(cv.deriveNameFrom('my_homE page')).to.equal('MyHomePage');
     });
 });
+
+describe(`${PROJECT_NAME}::project_naming`, () => {
+    const sessionID = cv.randomCounter(8);
+    it('should generate name based on sessionID', () => {
+        const sourceDir = path.join('home', 'project-files', sessionID);
+        expect(cv.deriveProjectNameFrom(sourceDir, sessionID))
+            .to.match(new RegExp(`.+${sessionID}.+`));
+    });
+
+    it('should generate name based on project root', () => {
+        const sourceDir = path.join('home', 'project-files');
+        expect(cv.deriveProjectNameFrom(sourceDir, sessionID))
+            .to.be.equal(path.basename(sourceDir));
+    });
+});
