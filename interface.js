@@ -959,10 +959,19 @@ function displayProgress(prefix, progress, total, received) {
 function humanReadableFormOf(bytes) {
     const BYTE_SCALING = 1024;
     const units        = ['B', 'KB', 'MB', 'GB', 'TB'];
+    const MAX_CONV = 1024 ** (units.length - 1);
+    const EPSILON = 1e-6;
+    assert(bytes <= MAX_CONV);
+
     let   i;
     for (i = 0; bytes >= BYTE_SCALING && i < units.length - 1; i++) {
         bytes /= BYTE_SCALING;
     }
+
+    // If we are close to an integer print the integer without a `.00` suffix
+    if(bytes - Math.floor(bytes) <= EPSILON)
+        return `${bytes}${units[i]}`;
+
     return `${bytes.toFixed(2)}${units[i]}`;
 }
 
@@ -3180,6 +3189,7 @@ export function exports() {
             checkIfActuallyRoot,
             findIndexFile,
             downloadProject,
+            humanReadableFormOf,
             bundleProject,
             removeTemplates,
             finalizeWriter,
